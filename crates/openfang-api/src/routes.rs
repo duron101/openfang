@@ -14,9 +14,15 @@ use openfang_kernel::OpenFangKernel;
 use openfang_runtime::kernel_handle::KernelHandle;
 use openfang_runtime::tool_runner::builtin_tool_definitions;
 use openfang_types::agent::{AgentId, AgentIdentity, AgentManifest};
+use openfang_types::cognition::CommanderIntent;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ManeuverObjectiveRequest {
+    pub objective: String,
+}
 
 /// Shared application state.
 ///
@@ -27,9 +33,7 @@ pub struct AppState {
     pub started_at: Instant,
     /// Optional peer registry for OFP mesh networking status.
     pub peer_registry: Option<Arc<openfang_wire::registry::PeerRegistry>>,
-    /// Channel bridge manager — held behind a Mutex so it can be swapped on hot-reload.
-    pub bridge_manager: tokio::sync::Mutex<Option<openfang_channels::bridge::BridgeManager>>,
-    /// Live channel config — updated on every hot-reload so list_channels() reflects reality.
+    /// Live channel config — updated when channel settings change on disk.
     pub channels_config: tokio::sync::RwLock<openfang_types::config::ChannelsConfig>,
     /// Notify handle to trigger graceful HTTP server shutdown from the API.
     pub shutdown_notify: Arc<tokio::sync::Notify>,
@@ -126,15 +130,13 @@ pub async fn list_agents(State(state): State<Arc<AppState>>) -> impl IntoRespons
         .into_iter()
         .map(|e| {
             // Resolve "default" provider/model to actual kernel defaults
-            let provider = if e.manifest.model.provider.is_empty()
-                || e.manifest.model.provider == "default"
-            {
-                dm.provider.as_str()
-            } else {
-                e.manifest.model.provider.as_str()
-            };
-            let model = if e.manifest.model.model.is_empty()
-                || e.manifest.model.model == "default"
+            let provider =
+                if e.manifest.model.provider.is_empty() || e.manifest.model.provider == "default" {
+                    dm.provider.as_str()
+                } else {
+                    e.manifest.model.provider.as_str()
+                };
+            let model = if e.manifest.model.model.is_empty() || e.manifest.model.model == "default"
             {
                 dm.model.as_str()
             } else {
@@ -1870,9 +1872,7 @@ fn build_field_json(
                     val.clone()
                 };
                 field["value"] = display_val;
-                if !val.is_null()
-                    && val.as_str().map(|s| !s.is_empty()).unwrap_or(true)
-                {
+                if !val.is_null() && val.as_str().map(|s| !s.is_empty()).unwrap_or(true) {
                     field["has_value"] = serde_json::Value::Bool(true);
                 }
             }
@@ -1892,46 +1892,166 @@ fn channel_config_values(
     name: &str,
 ) -> Option<serde_json::Value> {
     match name {
-        "telegram" => config.telegram.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "discord" => config.discord.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "slack" => config.slack.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "whatsapp" => config.whatsapp.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "signal" => config.signal.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "matrix" => config.matrix.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "email" => config.email.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "teams" => config.teams.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "mattermost" => config.mattermost.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "irc" => config.irc.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "google_chat" => config.google_chat.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "twitch" => config.twitch.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "rocketchat" => config.rocketchat.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "zulip" => config.zulip.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "xmpp" => config.xmpp.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "line" => config.line.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "viber" => config.viber.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "messenger" => config.messenger.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "reddit" => config.reddit.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "mastodon" => config.mastodon.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "bluesky" => config.bluesky.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "feishu" => config.feishu.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "revolt" => config.revolt.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "nextcloud" => config.nextcloud.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "guilded" => config.guilded.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "keybase" => config.keybase.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "threema" => config.threema.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "nostr" => config.nostr.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "webex" => config.webex.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "pumble" => config.pumble.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "flock" => config.flock.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "twist" => config.twist.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "mumble" => config.mumble.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "dingtalk" => config.dingtalk.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "discourse" => config.discourse.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "gitter" => config.gitter.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "ntfy" => config.ntfy.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "gotify" => config.gotify.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "webhook" => config.webhook.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "linkedin" => config.linkedin.as_ref().and_then(|c| serde_json::to_value(c).ok()),
+        "telegram" => config
+            .telegram
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "discord" => config
+            .discord
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "slack" => config
+            .slack
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "whatsapp" => config
+            .whatsapp
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "signal" => config
+            .signal
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "matrix" => config
+            .matrix
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "email" => config
+            .email
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "teams" => config
+            .teams
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "mattermost" => config
+            .mattermost
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "irc" => config
+            .irc
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "google_chat" => config
+            .google_chat
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "twitch" => config
+            .twitch
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "rocketchat" => config
+            .rocketchat
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "zulip" => config
+            .zulip
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "xmpp" => config
+            .xmpp
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "line" => config
+            .line
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "viber" => config
+            .viber
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "messenger" => config
+            .messenger
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "reddit" => config
+            .reddit
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "mastodon" => config
+            .mastodon
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "bluesky" => config
+            .bluesky
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "feishu" => config
+            .feishu
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "revolt" => config
+            .revolt
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "nextcloud" => config
+            .nextcloud
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "guilded" => config
+            .guilded
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "keybase" => config
+            .keybase
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "threema" => config
+            .threema
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "nostr" => config
+            .nostr
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "webex" => config
+            .webex
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "pumble" => config
+            .pumble
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "flock" => config
+            .flock
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "twist" => config
+            .twist
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "mumble" => config
+            .mumble
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "dingtalk" => config
+            .dingtalk
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "discourse" => config
+            .discourse
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "gitter" => config
+            .gitter
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "ntfy" => config
+            .ntfy
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "gotify" => config
+            .gotify
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "webhook" => config
+            .webhook
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "linkedin" => config
+            .linkedin
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
         _ => None,
     }
 }
@@ -2053,7 +2173,10 @@ pub async fn configure_channel(
             );
         } else {
             // Config field — collect for TOML write with type info
-            config_fields.insert(field_def.key.to_string(), (value.to_string(), field_def.field_type));
+            config_fields.insert(
+                field_def.key.to_string(),
+                (value.to_string(), field_def.field_type),
+            );
         }
     }
 
@@ -2065,34 +2188,25 @@ pub async fn configure_channel(
         );
     }
 
-    // Hot-reload: activate the channel immediately
-    match crate::channel_bridge::reload_channels_from_disk(&state).await {
-        Ok(started) => {
-            let activated = started.iter().any(|s| s.eq_ignore_ascii_case(&name));
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "configured",
-                    "channel": name,
-                    "activated": activated,
-                    "started_channels": started,
-                    "note": if activated {
-                        format!("{} activated successfully.", name)
-                    } else {
-                        "Channel configured but could not start (check credentials).".to_string()
-                    }
-                })),
-            )
-        }
+    match refresh_channels_config_from_disk(&state).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "configured",
+                "channel": name,
+                "activated": false,
+                "note": format!("{name} configured. Restart daemon to activate.")
+            })),
+        ),
         Err(e) => {
-            tracing::warn!(error = %e, "Channel hot-reload failed after configure");
+            tracing::warn!(error = %e, "Channel config refresh failed after configure");
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "status": "configured",
                     "channel": name,
                     "activated": false,
-                    "note": format!("Configured, but hot-reload failed: {e}. Restart daemon to activate.")
+                    "note": format!("Configured, but config refresh failed: {e}. Restart daemon to activate.")
                 })),
             )
         }
@@ -2137,25 +2251,23 @@ pub async fn remove_channel(
         );
     }
 
-    // Hot-reload: deactivate the channel immediately
-    match crate::channel_bridge::reload_channels_from_disk(&state).await {
-        Ok(started) => (
+    match refresh_channels_config_from_disk(&state).await {
+        Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "status": "removed",
                 "channel": name,
-                "remaining_channels": started,
-                "note": format!("{} deactivated.", name)
+                "note": format!("{name} removed. Restart daemon to fully deactivate.")
             })),
         ),
         Err(e) => {
-            tracing::warn!(error = %e, "Channel hot-reload failed after remove");
+            tracing::warn!(error = %e, "Channel config refresh failed after remove");
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "status": "removed",
                     "channel": name,
-                    "note": format!("Removed, but hot-reload failed: {e}. Restart daemon to fully deactivate.")
+                    "note": format!("Removed, but config refresh failed: {e}. Restart daemon to fully deactivate.")
                 })),
             )
         }
@@ -2307,26 +2419,6 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
         }
     }
     Ok(())
-}
-
-/// POST /api/channels/reload — Manually trigger a channel hot-reload from disk config.
-pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match crate::channel_bridge::reload_channels_from_disk(&state).await {
-        Ok(started) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "started": started,
-            })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "status": "error",
-                "error": e,
-            })),
-        ),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3057,7 +3149,9 @@ pub async fn clawhub_search(
                 "items": items,
                 "next_cursor": null,
             });
-            state.clawhub_cache.insert(cache_key, (Instant::now(), resp.clone()));
+            state
+                .clawhub_cache
+                .insert(cache_key, (Instant::now(), resp.clone()));
             (StatusCode::OK, Json(resp))
         }
         Err(e) => {
@@ -3071,9 +3165,7 @@ pub async fn clawhub_search(
             };
             (
                 status,
-                Json(
-                    serde_json::json!({"items": [], "next_cursor": null, "error": msg}),
-                ),
+                Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
             )
         }
     }
@@ -3126,7 +3218,9 @@ pub async fn clawhub_browse(
                 "items": items,
                 "next_cursor": results.next_cursor,
             });
-            state.clawhub_cache.insert(cache_key, (Instant::now(), resp.clone()));
+            state
+                .clawhub_cache
+                .insert(cache_key, (Instant::now(), resp.clone()));
             (StatusCode::OK, Json(resp))
         }
         Err(e) => {
@@ -3139,9 +3233,7 @@ pub async fn clawhub_browse(
             };
             (
                 status,
-                Json(
-                    serde_json::json!({"items": [], "next_cursor": null, "error": msg}),
-                ),
+                Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
             )
         }
     }
@@ -3308,7 +3400,10 @@ pub async fn clawhub_install(
                 StatusCode::FORBIDDEN
             } else if msg.contains("429") || msg.contains("rate limit") {
                 StatusCode::TOO_MANY_REQUESTS
-            } else if msg.contains("Network error") || msg.contains("returned 4") || msg.contains("returned 5") {
+            } else if msg.contains("Network error")
+                || msg.contains("returned 4")
+                || msg.contains("returned 5")
+            {
                 StatusCode::BAD_GATEWAY
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -3333,803 +3428,6 @@ fn clawhub_browse_entry_to_json(
         "stars": entry.stats.stars,
         "updated_at": entry.updated_at,
     })
-}
-
-// ---------------------------------------------------------------------------
-// Hands endpoints
-// ---------------------------------------------------------------------------
-
-/// Detect the server platform for install command selection.
-fn server_platform() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        "linux"
-    }
-}
-
-/// GET /api/hands — List all hand definitions (marketplace).
-pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let defs = state.kernel.hand_registry.list_definitions();
-    let hands: Vec<serde_json::Value> = defs
-        .iter()
-        .map(|d| {
-            let reqs = state
-                .kernel
-                .hand_registry
-                .check_requirements(&d.id)
-                .unwrap_or_default();
-            let all_satisfied = reqs.iter().all(|(_, ok)| *ok);
-            serde_json::json!({
-                "id": d.id,
-                "name": d.name,
-                "description": d.description,
-                "category": d.category,
-                "icon": d.icon,
-                "tools": d.tools,
-                "requirements_met": all_satisfied,
-                "requirements": reqs.iter().map(|(r, ok)| serde_json::json!({
-                    "key": r.key,
-                    "label": r.label,
-                    "satisfied": ok,
-                })).collect::<Vec<_>>(),
-                "dashboard_metrics": d.dashboard.metrics.len(),
-                "has_settings": !d.settings.is_empty(),
-                "settings_count": d.settings.len(),
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!({ "hands": hands, "total": hands.len() }))
-}
-
-/// GET /api/hands/active — List active hand instances.
-pub async fn list_active_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let instances = state.kernel.hand_registry.list_instances();
-    let items: Vec<serde_json::Value> = instances
-        .iter()
-        .map(|i| {
-            serde_json::json!({
-                "instance_id": i.instance_id,
-                "hand_id": i.hand_id,
-                "status": format!("{}", i.status),
-                "agent_id": i.agent_id.map(|a| a.to_string()),
-                "agent_name": i.agent_name,
-                "activated_at": i.activated_at.to_rfc3339(),
-                "updated_at": i.updated_at.to_rfc3339(),
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!({ "instances": items, "total": items.len() }))
-}
-
-/// GET /api/hands/{hand_id} — Get a single hand definition with requirements check.
-pub async fn get_hand(
-    State(state): State<Arc<AppState>>,
-    Path(hand_id): Path<String>,
-) -> impl IntoResponse {
-    match state.kernel.hand_registry.get_definition(&hand_id) {
-        Some(def) => {
-            let reqs = state
-                .kernel
-                .hand_registry
-                .check_requirements(&hand_id)
-                .unwrap_or_default();
-            let all_satisfied = reqs.iter().all(|(_, ok)| *ok);
-            let settings_status = state
-                .kernel
-                .hand_registry
-                .check_settings_availability(&hand_id)
-                .unwrap_or_default();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "id": def.id,
-                    "name": def.name,
-                    "description": def.description,
-                    "category": def.category,
-                    "icon": def.icon,
-                    "tools": def.tools,
-                    "requirements_met": all_satisfied,
-                    "requirements": reqs.iter().map(|(r, ok)| {
-                        let mut req_json = serde_json::json!({
-                            "key": r.key,
-                            "label": r.label,
-                            "type": format!("{:?}", r.requirement_type),
-                            "check_value": r.check_value,
-                            "satisfied": ok,
-                        });
-                        if let Some(ref desc) = r.description {
-                            req_json["description"] = serde_json::json!(desc);
-                        }
-                        if let Some(ref install) = r.install {
-                            req_json["install"] = serde_json::to_value(install).unwrap_or_default();
-                        }
-                        req_json
-                    }).collect::<Vec<_>>(),
-                    "server_platform": server_platform(),
-                    "agent": {
-                        "name": def.agent.name,
-                        "description": def.agent.description,
-                        "provider": if def.agent.provider == "default" {
-                            &state.kernel.config.default_model.provider
-                        } else { &def.agent.provider },
-                        "model": if def.agent.model == "default" {
-                            &state.kernel.config.default_model.model
-                        } else { &def.agent.model },
-                    },
-                    "dashboard": def.dashboard.metrics.iter().map(|m| serde_json::json!({
-                        "label": m.label,
-                        "memory_key": m.memory_key,
-                        "format": m.format,
-                    })).collect::<Vec<_>>(),
-                    "settings": settings_status,
-                })),
-            )
-        }
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Hand not found: {hand_id}")})),
-        ),
-    }
-}
-
-/// POST /api/hands/{hand_id}/check-deps — Re-check dependency status for a hand.
-pub async fn check_hand_deps(
-    State(state): State<Arc<AppState>>,
-    Path(hand_id): Path<String>,
-) -> impl IntoResponse {
-    match state.kernel.hand_registry.get_definition(&hand_id) {
-        Some(def) => {
-            let reqs = state
-                .kernel
-                .hand_registry
-                .check_requirements(&hand_id)
-                .unwrap_or_default();
-            let all_satisfied = reqs.iter().all(|(_, ok)| *ok);
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "hand_id": def.id,
-                    "requirements_met": all_satisfied,
-                    "server_platform": server_platform(),
-                    "requirements": reqs.iter().map(|(r, ok)| {
-                        let mut req_json = serde_json::json!({
-                            "key": r.key,
-                            "label": r.label,
-                            "type": format!("{:?}", r.requirement_type),
-                            "check_value": r.check_value,
-                            "satisfied": ok,
-                        });
-                        if let Some(ref desc) = r.description {
-                            req_json["description"] = serde_json::json!(desc);
-                        }
-                        if let Some(ref install) = r.install {
-                            req_json["install"] = serde_json::to_value(install).unwrap_or_default();
-                        }
-                        req_json
-                    }).collect::<Vec<_>>(),
-                })),
-            )
-        }
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Hand not found: {hand_id}")})),
-        ),
-    }
-}
-
-/// POST /api/hands/{hand_id}/install-deps — Auto-install missing dependencies for a hand.
-pub async fn install_hand_deps(
-    State(state): State<Arc<AppState>>,
-    Path(hand_id): Path<String>,
-) -> impl IntoResponse {
-    let def = match state.kernel.hand_registry.get_definition(&hand_id) {
-        Some(d) => d.clone(),
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Hand not found: {hand_id}")})),
-            );
-        }
-    };
-
-    let reqs = state
-        .kernel
-        .hand_registry
-        .check_requirements(&hand_id)
-        .unwrap_or_default();
-
-    let platform = server_platform();
-    let mut results = Vec::new();
-
-    for (req, already_satisfied) in &reqs {
-        if *already_satisfied {
-            results.push(serde_json::json!({
-                "key": req.key,
-                "status": "already_installed",
-                "message": format!("{} is already available", req.label),
-            }));
-            continue;
-        }
-
-        let install = match &req.install {
-            Some(i) => i,
-            None => {
-                results.push(serde_json::json!({
-                    "key": req.key,
-                    "status": "skipped",
-                    "message": "No install instructions available",
-                }));
-                continue;
-            }
-        };
-
-        // Pick the best install command for this platform
-        let cmd = match platform {
-            "windows" => install.windows.as_deref().or(install.pip.as_deref()),
-            "macos" => install.macos.as_deref().or(install.pip.as_deref()),
-            _ => install
-                .linux_apt
-                .as_deref()
-                .or(install.linux_dnf.as_deref())
-                .or(install.linux_pacman.as_deref())
-                .or(install.pip.as_deref()),
-        };
-
-        let cmd = match cmd {
-            Some(c) => c,
-            None => {
-                results.push(serde_json::json!({
-                    "key": req.key,
-                    "status": "no_command",
-                    "message": format!("No install command for platform: {platform}"),
-                }));
-                continue;
-            }
-        };
-
-        // Execute the install command
-        let (shell, flag) = if cfg!(windows) {
-            ("cmd", "/C")
-        } else {
-            ("sh", "-c")
-        };
-
-        // For winget on Windows, add --accept flags to avoid interactive prompts
-        let final_cmd = if cfg!(windows) && cmd.starts_with("winget ") {
-            format!("{cmd} --accept-source-agreements --accept-package-agreements")
-        } else {
-            cmd.to_string()
-        };
-
-        tracing::info!(hand = %hand_id, dep = %req.key, cmd = %final_cmd, "Auto-installing dependency");
-
-        let output = match tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            tokio::process::Command::new(shell)
-                .arg(flag)
-                .arg(&final_cmd)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .stdin(std::process::Stdio::null())
-                .output(),
-        )
-        .await
-        {
-            Ok(Ok(out)) => out,
-            Ok(Err(e)) => {
-                results.push(serde_json::json!({
-                    "key": req.key,
-                    "status": "error",
-                    "command": final_cmd,
-                    "message": format!("Failed to execute: {e}"),
-                }));
-                continue;
-            }
-            Err(_) => {
-                results.push(serde_json::json!({
-                    "key": req.key,
-                    "status": "timeout",
-                    "command": final_cmd,
-                    "message": "Installation timed out after 5 minutes",
-                }));
-                continue;
-            }
-        };
-
-        let exit_code = output.status.code().unwrap_or(-1);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        if exit_code == 0 {
-            results.push(serde_json::json!({
-                "key": req.key,
-                "status": "installed",
-                "command": final_cmd,
-                "message": format!("{} installed successfully", req.label),
-            }));
-        } else {
-            // On Windows, winget may return non-zero even on success (e.g., already installed)
-            let combined = format!("{stdout}{stderr}");
-            let likely_ok = combined.contains("already installed")
-                || combined.contains("No applicable update")
-                || combined.contains("No available upgrade");
-            results.push(serde_json::json!({
-                "key": req.key,
-                "status": if likely_ok { "installed" } else { "error" },
-                "command": final_cmd,
-                "exit_code": exit_code,
-                "message": if likely_ok {
-                    format!("{} is already installed", req.label)
-                } else {
-                    let msg = stderr.chars().take(500).collect::<String>();
-                    format!("Install failed (exit {}): {}", exit_code, msg.trim())
-                },
-            }));
-        }
-    }
-
-    // On Windows, refresh PATH to pick up newly installed binaries from winget/pip
-    #[cfg(windows)]
-    {
-        let home = std::env::var("USERPROFILE").unwrap_or_default();
-        if !home.is_empty() {
-            let winget_pkgs =
-                std::path::Path::new(&home).join("AppData\\Local\\Microsoft\\WinGet\\Packages");
-            if winget_pkgs.is_dir() {
-                let mut extra_paths = Vec::new();
-                if let Ok(entries) = std::fs::read_dir(&winget_pkgs) {
-                    for entry in entries.flatten() {
-                        let pkg_dir = entry.path();
-                        // Look for bin/ subdirectory (ffmpeg style)
-                        if let Ok(sub_entries) = std::fs::read_dir(&pkg_dir) {
-                            for sub in sub_entries.flatten() {
-                                let bin_dir = sub.path().join("bin");
-                                if bin_dir.is_dir() {
-                                    extra_paths.push(bin_dir.to_string_lossy().to_string());
-                                }
-                            }
-                        }
-                        // Direct exe in package dir (yt-dlp style)
-                        if std::fs::read_dir(&pkg_dir)
-                            .map(|rd| {
-                                rd.flatten().any(|e| {
-                                    e.path().extension().map(|x| x == "exe").unwrap_or(false)
-                                })
-                            })
-                            .unwrap_or(false)
-                        {
-                            extra_paths.push(pkg_dir.to_string_lossy().to_string());
-                        }
-                    }
-                }
-                // Also add pip Scripts dir
-                let pip_scripts =
-                    std::path::Path::new(&home).join("AppData\\Local\\Programs\\Python");
-                if pip_scripts.is_dir() {
-                    if let Ok(entries) = std::fs::read_dir(&pip_scripts) {
-                        for entry in entries.flatten() {
-                            let scripts = entry.path().join("Scripts");
-                            if scripts.is_dir() {
-                                extra_paths.push(scripts.to_string_lossy().to_string());
-                            }
-                        }
-                    }
-                }
-                if !extra_paths.is_empty() {
-                    let current_path = std::env::var("PATH").unwrap_or_default();
-                    let new_path = format!("{};{}", extra_paths.join(";"), current_path);
-                    std::env::set_var("PATH", &new_path);
-                    tracing::info!(
-                        added = extra_paths.len(),
-                        "Refreshed PATH with winget/pip directories"
-                    );
-                }
-            }
-        }
-    }
-
-    // Re-check requirements after installation
-    let reqs_after = state
-        .kernel
-        .hand_registry
-        .check_requirements(&hand_id)
-        .unwrap_or_default();
-    let all_satisfied = reqs_after.iter().all(|(_, ok)| *ok);
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "hand_id": def.id,
-            "results": results,
-            "requirements_met": all_satisfied,
-            "requirements": reqs_after.iter().map(|(r, ok)| {
-                serde_json::json!({
-                    "key": r.key,
-                    "label": r.label,
-                    "satisfied": ok,
-                })
-            }).collect::<Vec<_>>(),
-        })),
-    )
-}
-
-/// POST /api/hands/install — Install a hand from TOML content.
-pub async fn install_hand(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let toml_content = body["toml_content"].as_str().unwrap_or("");
-    let skill_content = body["skill_content"].as_str().unwrap_or("");
-
-    if toml_content.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing toml_content field"})),
-        );
-    }
-
-    match state
-        .kernel
-        .hand_registry
-        .install_from_content(toml_content, skill_content)
-    {
-        Ok(def) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "id": def.id,
-                "name": def.name,
-                "description": def.description,
-                "category": format!("{:?}", def.category),
-            })),
-        ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
-    }
-}
-
-/// POST /api/hands/{hand_id}/activate — Activate a hand (spawns agent).
-pub async fn activate_hand(
-    State(state): State<Arc<AppState>>,
-    Path(hand_id): Path<String>,
-    body: Option<Json<openfang_hands::ActivateHandRequest>>,
-) -> impl IntoResponse {
-    let config = body.map(|b| b.0.config).unwrap_or_default();
-
-    match state.kernel.activate_hand(&hand_id, config) {
-        Ok(instance) => {
-            // If the hand agent has a non-reactive schedule (autonomous hands),
-            // start its background loop so it begins running immediately.
-            if let Some(agent_id) = instance.agent_id {
-                let entry = state.kernel.registry.list().into_iter().find(|e| e.id == agent_id);
-                if let Some(entry) = entry {
-                    if !matches!(
-                        entry.manifest.schedule,
-                        openfang_types::agent::ScheduleMode::Reactive
-                    ) {
-                        state.kernel.start_background_for_agent(
-                            agent_id,
-                            &entry.name,
-                            &entry.manifest.schedule,
-                        );
-                    }
-                }
-            }
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "instance_id": instance.instance_id,
-                    "hand_id": instance.hand_id,
-                    "status": format!("{}", instance.status),
-                    "agent_id": instance.agent_id.map(|a| a.to_string()),
-                    "agent_name": instance.agent_name,
-                    "activated_at": instance.activated_at.to_rfc3339(),
-                })),
-            )
-        }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
-    }
-}
-
-/// POST /api/hands/instances/{id}/pause — Pause a hand instance.
-pub async fn pause_hand(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<uuid::Uuid>,
-) -> impl IntoResponse {
-    match state.kernel.pause_hand(id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "paused", "instance_id": id})),
-        ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
-    }
-}
-
-/// POST /api/hands/instances/{id}/resume — Resume a paused hand instance.
-pub async fn resume_hand(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<uuid::Uuid>,
-) -> impl IntoResponse {
-    match state.kernel.resume_hand(id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "resumed", "instance_id": id})),
-        ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
-    }
-}
-
-/// DELETE /api/hands/instances/{id} — Deactivate a hand (kills agent).
-pub async fn deactivate_hand(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<uuid::Uuid>,
-) -> impl IntoResponse {
-    match state.kernel.deactivate_hand(id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "deactivated", "instance_id": id})),
-        ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
-    }
-}
-
-/// GET /api/hands/{hand_id}/settings — Get settings schema and current values for a hand.
-pub async fn get_hand_settings(
-    State(state): State<Arc<AppState>>,
-    Path(hand_id): Path<String>,
-) -> impl IntoResponse {
-    let settings_status = match state
-        .kernel
-        .hand_registry
-        .check_settings_availability(&hand_id)
-    {
-        Ok(s) => s,
-        Err(_) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Hand not found: {hand_id}")})),
-            );
-        }
-    };
-
-    // Find active instance config values (if any)
-    let instance_config: std::collections::HashMap<String, serde_json::Value> = state
-        .kernel
-        .hand_registry
-        .list_instances()
-        .iter()
-        .find(|i| i.hand_id == hand_id)
-        .map(|i| i.config.clone())
-        .unwrap_or_default();
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "hand_id": hand_id,
-            "settings": settings_status,
-            "current_values": instance_config,
-        })),
-    )
-}
-
-/// PUT /api/hands/{hand_id}/settings — Update settings for a hand instance.
-pub async fn update_hand_settings(
-    State(state): State<Arc<AppState>>,
-    Path(hand_id): Path<String>,
-    Json(config): Json<std::collections::HashMap<String, serde_json::Value>>,
-) -> impl IntoResponse {
-    // Find active instance for this hand
-    let instance_id = state
-        .kernel
-        .hand_registry
-        .list_instances()
-        .iter()
-        .find(|i| i.hand_id == hand_id)
-        .map(|i| i.instance_id);
-
-    match instance_id {
-        Some(id) => match state.kernel.hand_registry.update_config(id, config.clone()) {
-            Ok(()) => (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "ok",
-                    "hand_id": hand_id,
-                    "instance_id": id,
-                    "config": config,
-                })),
-            ),
-            Err(e) => (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("{e}")})),
-            ),
-        },
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("No active instance for hand: {hand_id}. Activate the hand first.")})),
-        ),
-    }
-}
-
-/// GET /api/hands/instances/{id}/stats — Get dashboard stats for a hand instance.
-pub async fn hand_stats(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<uuid::Uuid>,
-) -> impl IntoResponse {
-    let instance = match state.kernel.hand_registry.get_instance(id) {
-        Some(i) => i,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Instance not found"})),
-            );
-        }
-    };
-
-    let def = match state.kernel.hand_registry.get_definition(&instance.hand_id) {
-        Some(d) => d,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Hand definition not found"})),
-            );
-        }
-    };
-
-    let agent_id = match instance.agent_id {
-        Some(aid) => aid,
-        None => {
-            return (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "instance_id": id,
-                    "hand_id": instance.hand_id,
-                    "metrics": {},
-                })),
-            );
-        }
-    };
-
-    // Read dashboard metrics from agent's structured memory
-    let mut metrics = serde_json::Map::new();
-    for metric in &def.dashboard.metrics {
-        let value = state
-            .kernel
-            .memory
-            .structured_get(agent_id, &metric.memory_key)
-            .ok()
-            .flatten()
-            .unwrap_or(serde_json::Value::Null);
-        metrics.insert(
-            metric.label.clone(),
-            serde_json::json!({
-                "value": value,
-                "format": metric.format,
-            }),
-        );
-    }
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "instance_id": id,
-            "hand_id": instance.hand_id,
-            "status": format!("{}", instance.status),
-            "agent_id": agent_id.to_string(),
-            "metrics": metrics,
-        })),
-    )
-}
-
-/// GET /api/hands/instances/{id}/browser — Get live browser state for a hand instance.
-pub async fn hand_instance_browser(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<uuid::Uuid>,
-) -> impl IntoResponse {
-    // 1. Look up instance
-    let instance = match state.kernel.hand_registry.get_instance(id) {
-        Some(i) => i,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Instance not found"})),
-            );
-        }
-    };
-
-    // 2. Get agent_id
-    let agent_id = match instance.agent_id {
-        Some(aid) => aid,
-        None => {
-            return (StatusCode::OK, Json(serde_json::json!({"active": false})));
-        }
-    };
-
-    let agent_id_str = agent_id.to_string();
-
-    // 3. Check if a browser session exists (without creating one)
-    if !state.kernel.browser_ctx.has_session(&agent_id_str) {
-        return (StatusCode::OK, Json(serde_json::json!({"active": false})));
-    }
-
-    // 4. Send ReadPage command to get page info
-    let mut url = String::new();
-    let mut title = String::new();
-    let mut content = String::new();
-
-    match state
-        .kernel
-        .browser_ctx
-        .send_command(
-            &agent_id_str,
-            openfang_runtime::browser::BrowserCommand::ReadPage,
-        )
-        .await
-    {
-        Ok(resp) if resp.success => {
-            if let Some(data) = &resp.data {
-                url = data["url"].as_str().unwrap_or("").to_string();
-                title = data["title"].as_str().unwrap_or("").to_string();
-                content = data["content"].as_str().unwrap_or("").to_string();
-                // Truncate content to avoid huge payloads (UTF-8 safe)
-                if content.len() > 2000 {
-                    content = format!("{}... (truncated)", openfang_types::truncate_str(&content, 2000));
-                }
-            }
-        }
-        Ok(_) => {}  // Non-success: leave defaults
-        Err(_) => {} // Error: leave defaults
-    }
-
-    // 5. Send Screenshot command to get visual state
-    let mut screenshot_base64 = String::new();
-
-    match state
-        .kernel
-        .browser_ctx
-        .send_command(
-            &agent_id_str,
-            openfang_runtime::browser::BrowserCommand::Screenshot,
-        )
-        .await
-    {
-        Ok(resp) if resp.success => {
-            if let Some(data) = &resp.data {
-                screenshot_base64 = data["image_base64"].as_str().unwrap_or("").to_string();
-            }
-        }
-        Ok(_) => {}
-        Err(_) => {}
-    }
-
-    // 6. Return combined state
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "active": true,
-            "url": url,
-            "title": title,
-            "content": content,
-            "screenshot_base64": screenshot_base64,
-        })),
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -4746,7 +4044,9 @@ pub async fn update_agent_budget(
     if hourly.is_none() && daily.is_none() && monthly.is_none() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd"})),
+            Json(
+                serde_json::json!({"error": "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd"}),
+            ),
         );
     }
 
@@ -4967,7 +4267,7 @@ pub async fn update_agent(
     }
 
     // Parse the new manifest
-    let _manifest: AgentManifest = match toml::from_str(&req.manifest_toml) {
+    let manifest: AgentManifest = match toml::from_str(&req.manifest_toml) {
         Ok(m) => m,
         Err(e) => {
             return (
@@ -4977,15 +4277,103 @@ pub async fn update_agent(
         }
     };
 
-    // Note: Full manifest update requires kill + respawn. For now, acknowledge receipt.
+    // Hot-apply the prompt + skill driven fields to the live agent. Each takes
+    // effect on the agent's next message — no restart required.
+    let mut applied: Vec<String> = Vec::new();
+
+    if !manifest.description.is_empty()
+        && state
+            .kernel
+            .registry
+            .update_description(agent_id, manifest.description.clone())
+            .is_ok()
+    {
+        applied.push("description".to_string());
+    }
+
+    if !manifest.model.system_prompt.trim().is_empty()
+        && state
+            .kernel
+            .set_agent_system_prompt(agent_id, manifest.model.system_prompt.clone())
+            .is_ok()
+    {
+        applied.push("system_prompt".to_string());
+    }
+
+    // Skills validate against installed skills; surface a clear error if unknown.
+    if let Err(e) = state
+        .kernel
+        .set_agent_skills(agent_id, manifest.skills.clone())
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("{e}")})),
+        );
+    }
+    applied.push("skills".to_string());
+
+    if !manifest.mcp_servers.is_empty()
+        && state
+            .kernel
+            .set_agent_mcp_servers(agent_id, manifest.mcp_servers.clone())
+            .is_ok()
+    {
+        applied.push("mcp_servers".to_string());
+    }
+
+    let model_id = manifest.model.model.trim();
+    if !model_id.is_empty()
+        && model_id != "default"
+        && state.kernel.set_agent_model(agent_id, model_id).is_ok()
+    {
+        applied.push("model".to_string());
+    }
+
+    // Persist the updated manifest + prompt back to disk so edits survive a restart.
+    let persisted = state.kernel.persist_agent_to_disk(agent_id).is_ok();
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "status": "acknowledged",
+            "status": "updated",
             "agent_id": id,
-            "note": "Full manifest update requires agent restart. Use DELETE + POST to apply.",
+            "applied": applied,
+            "persisted": persisted,
+            "note": "Changes take effect on the agent's next message.",
         })),
     )
+}
+
+/// POST /api/agents/:id/reload — Re-read an agent's `agent.toml` + `SYSTEM_PROMPT.md`
+/// from disk and hot-apply the prompt + skills to the live agent.
+pub async fn reload_agent(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            );
+        }
+    };
+
+    match state.kernel.reload_agent_from_disk(agent_id) {
+        Ok(summary) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "reloaded",
+                "agent_id": id,
+                "detail": summary,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("{e}")})),
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5064,114 +4452,6 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
         "secret_zeroization": true,
         "total_features": 15
     }))
-}
-
-/// GET /api/migrate/detect — Auto-detect OpenClaw installation.
-pub async fn migrate_detect() -> impl IntoResponse {
-    match openfang_migrate::openclaw::detect_openclaw_home() {
-        Some(path) => {
-            let scan = openfang_migrate::openclaw::scan_openclaw_workspace(&path);
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "detected": true,
-                    "path": path.display().to_string(),
-                    "scan": scan,
-                })),
-            )
-        }
-        None => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "detected": false,
-                "path": null,
-                "scan": null,
-            })),
-        ),
-    }
-}
-
-/// POST /api/migrate/scan — Scan a specific directory for OpenClaw workspace.
-pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoResponse {
-    let path = std::path::PathBuf::from(&req.path);
-    if !path.exists() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Directory not found"})),
-        );
-    }
-    let scan = openfang_migrate::openclaw::scan_openclaw_workspace(&path);
-    (StatusCode::OK, Json(serde_json::json!(scan)))
-}
-
-/// POST /api/migrate — Run migration from another agent framework.
-pub async fn run_migrate(Json(req): Json<MigrateRequest>) -> impl IntoResponse {
-    let source = match req.source.as_str() {
-        "openclaw" => openfang_migrate::MigrateSource::OpenClaw,
-        "langchain" => openfang_migrate::MigrateSource::LangChain,
-        "autogpt" => openfang_migrate::MigrateSource::AutoGpt,
-        other => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": format!("Unknown source: {other}. Use 'openclaw', 'langchain', or 'autogpt'")}),
-                ),
-            );
-        }
-    };
-
-    let options = openfang_migrate::MigrateOptions {
-        source,
-        source_dir: std::path::PathBuf::from(&req.source_dir),
-        target_dir: std::path::PathBuf::from(&req.target_dir),
-        dry_run: req.dry_run,
-    };
-
-    match openfang_migrate::run_migration(&options) {
-        Ok(report) => {
-            let imported: Vec<serde_json::Value> = report
-                .imported
-                .iter()
-                .map(|i| {
-                    serde_json::json!({
-                        "kind": format!("{}", i.kind),
-                        "name": i.name,
-                        "destination": i.destination,
-                    })
-                })
-                .collect();
-
-            let skipped: Vec<serde_json::Value> = report
-                .skipped
-                .iter()
-                .map(|s| {
-                    serde_json::json!({
-                        "kind": format!("{}", s.kind),
-                        "name": s.name,
-                        "reason": s.reason,
-                    })
-                })
-                .collect();
-
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "completed",
-                    "dry_run": req.dry_run,
-                    "imported": imported,
-                    "imported_count": imported.len(),
-                    "skipped": skipped,
-                    "skipped_count": skipped.len(),
-                    "warnings": report.warnings,
-                    "report_markdown": report.to_markdown(),
-                })),
-            )
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Migration failed: {e}")})),
-        ),
-    }
 }
 
 // ── Model Catalog Endpoints ─────────────────────────────────────────
@@ -5465,7 +4745,9 @@ pub async fn add_custom_model(
     if !catalog.add_custom_model(entry) {
         return (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": format!("Model '{}' already exists for provider '{}'", id, provider)})),
+            Json(
+                serde_json::json!({"error": format!("Model '{}' already exists for provider '{}'", id, provider)}),
+            ),
         );
     }
 
@@ -6250,10 +5532,7 @@ pub async fn set_agent_tools(
         .kernel
         .set_agent_tool_filters(agent_id, allowlist, blocklist)
     {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "ok"})),
-        ),
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("{e}")})),
@@ -6463,10 +5742,7 @@ pub async fn set_provider_key(
             .map(|p| p.api_key_env.clone())
             .unwrap_or_else(|| {
                 // Custom provider — derive env var: MY_PROVIDER → MY_PROVIDER_API_KEY
-                format!(
-                    "{}_API_KEY",
-                    name.to_uppercase().replace('-', "_")
-                )
+                format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))
             })
     };
 
@@ -6695,8 +5971,7 @@ pub async fn set_provider_url(
     }
 
     // Probe reachability at the new URL
-    let probe =
-        openfang_runtime::provider_health::probe_provider(&name, &base_url).await;
+    let probe = openfang_runtime::provider_health::probe_provider(&name, &base_url).await;
 
     // Merge discovered models into catalog
     if !probe.discovered_models.is_empty() {
@@ -6970,6 +6245,39 @@ fn upsert_channel_config(
     Ok(())
 }
 
+/// Reload secrets.env and channels config from disk.
+async fn refresh_channels_config_from_disk(state: &AppState) -> Result<(), String> {
+    let secrets_path = state.kernel.config.home_dir.join("secrets.env");
+    if secrets_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&secrets_path) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if let Some(eq_pos) = trimmed.find('=') {
+                    let key = trimmed[..eq_pos].trim();
+                    let mut value = trimmed[eq_pos + 1..].trim().to_string();
+                    if !key.is_empty() {
+                        if ((value.starts_with('"') && value.ends_with('"'))
+                            || (value.starts_with('\'') && value.ends_with('\'')))
+                            && value.len() >= 2
+                        {
+                            value = value[1..value.len() - 1].to_string();
+                        }
+                        std::env::set_var(key, &value);
+                    }
+                }
+            }
+        }
+    }
+
+    let config_path = state.kernel.config.home_dir.join("config.toml");
+    let fresh_config = openfang_kernel::config::load_config(Some(&config_path));
+    *state.channels_config.write().await = fresh_config.channels.clone();
+    Ok(())
+}
+
 /// Remove a `[channels.<name>]` section from config.toml.
 fn remove_channel_config(
     config_path: &std::path::Path,
@@ -6996,275 +6304,6 @@ fn remove_channel_config(
 
     std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Integration management endpoints
-// ---------------------------------------------------------------------------
-
-/// GET /api/integrations — List installed integrations with status.
-pub async fn list_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let registry = state
-        .kernel
-        .extension_registry
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
-    let health = &state.kernel.extension_health;
-
-    let mut entries = Vec::new();
-    for info in registry.list_all_info() {
-        let h = health.get_health(&info.template.id);
-        let status = match &info.installed {
-            Some(inst) if !inst.enabled => "disabled",
-            Some(_) => match h.as_ref().map(|h| &h.status) {
-                Some(openfang_extensions::IntegrationStatus::Ready) => "ready",
-                Some(openfang_extensions::IntegrationStatus::Error(_)) => "error",
-                _ => "installed",
-            },
-            None => continue, // Only show installed
-        };
-        entries.push(serde_json::json!({
-            "id": info.template.id,
-            "name": info.template.name,
-            "icon": info.template.icon,
-            "category": info.template.category.to_string(),
-            "status": status,
-            "tool_count": h.as_ref().map(|h| h.tool_count).unwrap_or(0),
-            "installed_at": info.installed.as_ref().map(|i| i.installed_at.to_rfc3339()),
-        }));
-    }
-
-    Json(serde_json::json!({
-        "installed": entries,
-        "count": entries.len(),
-    }))
-}
-
-/// GET /api/integrations/available — List all available templates.
-pub async fn list_available_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let registry = state
-        .kernel
-        .extension_registry
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
-    let templates: Vec<serde_json::Value> = registry
-        .list_templates()
-        .iter()
-        .map(|t| {
-            let installed = registry.is_installed(&t.id);
-            serde_json::json!({
-                "id": t.id,
-                "name": t.name,
-                "description": t.description,
-                "icon": t.icon,
-                "category": t.category.to_string(),
-                "installed": installed,
-                "tags": t.tags,
-                "required_env": t.required_env.iter().map(|e| serde_json::json!({
-                    "name": e.name,
-                    "label": e.label,
-                    "help": e.help,
-                    "is_secret": e.is_secret,
-                    "get_url": e.get_url,
-                })).collect::<Vec<_>>(),
-                "has_oauth": t.oauth.is_some(),
-                "setup_instructions": t.setup_instructions,
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!({
-        "integrations": templates,
-        "count": templates.len(),
-    }))
-}
-
-/// POST /api/integrations/add — Install an integration.
-pub async fn add_integration(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let id = match req.get("id").and_then(|v| v.as_str()) {
-        Some(id) => id.to_string(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'id' field"})),
-            );
-        }
-    };
-
-    // Scope the write lock so it's dropped before any .await
-    let install_err = {
-        let mut registry = state
-            .kernel
-            .extension_registry
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-
-        if registry.is_installed(&id) {
-            Some((
-                StatusCode::CONFLICT,
-                format!("Integration '{}' already installed", id),
-            ))
-        } else if registry.get_template(&id).is_none() {
-            Some((
-                StatusCode::NOT_FOUND,
-                format!("Unknown integration: '{}'", id),
-            ))
-        } else {
-            let entry = openfang_extensions::InstalledIntegration {
-                id: id.clone(),
-                installed_at: chrono::Utc::now(),
-                enabled: true,
-                oauth_provider: None,
-                config: std::collections::HashMap::new(),
-            };
-            match registry.install(entry) {
-                Ok(_) => None,
-                Err(e) => Some((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
-            }
-        }
-    }; // write lock dropped here
-
-    if let Some((status, error)) = install_err {
-        return (status, Json(serde_json::json!({"error": error})));
-    }
-
-    state.kernel.extension_health.register(&id);
-
-    // Hot-connect the new MCP server
-    let connected = state.kernel.reload_extension_mcps().await.unwrap_or(0);
-
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "id": id,
-            "status": "installed",
-            "connected": connected > 0,
-            "message": format!("Integration '{}' installed", id),
-        })),
-    )
-}
-
-/// DELETE /api/integrations/:id — Remove an integration.
-pub async fn remove_integration(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    // Scope the write lock
-    let uninstall_err = {
-        let mut registry = state
-            .kernel
-            .extension_registry
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        registry.uninstall(&id).err()
-    };
-
-    if let Some(e) = uninstall_err {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": e.to_string()})),
-        );
-    }
-
-    state.kernel.extension_health.unregister(&id);
-
-    // Hot-disconnect the removed MCP server
-    let _ = state.kernel.reload_extension_mcps().await;
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "id": id,
-            "status": "removed",
-        })),
-    )
-}
-
-/// POST /api/integrations/:id/reconnect — Reconnect an MCP server.
-pub async fn reconnect_integration(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let is_installed = {
-        let registry = state
-            .kernel
-            .extension_registry
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        registry.is_installed(&id)
-    };
-
-    if !is_installed {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Integration '{}' not installed", id)})),
-        );
-    }
-
-    match state.kernel.reconnect_extension_mcp(&id).await {
-        Ok(tool_count) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "id": id,
-                "status": "connected",
-                "tool_count": tool_count,
-            })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "id": id,
-                "status": "error",
-                "error": e,
-            })),
-        ),
-    }
-}
-
-/// GET /api/integrations/health — Health status for all integrations.
-pub async fn integrations_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let health_entries = state.kernel.extension_health.all_health();
-    let entries: Vec<serde_json::Value> = health_entries
-        .iter()
-        .map(|h| {
-            serde_json::json!({
-                "id": h.id,
-                "status": h.status.to_string(),
-                "tool_count": h.tool_count,
-                "last_ok": h.last_ok.map(|t| t.to_rfc3339()),
-                "last_error": h.last_error,
-                "consecutive_failures": h.consecutive_failures,
-                "reconnecting": h.reconnecting,
-                "reconnect_attempts": h.reconnect_attempts,
-                "connected_since": h.connected_since.map(|t| t.to_rfc3339()),
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!({
-        "health": entries,
-        "count": entries.len(),
-    }))
-}
-
-/// POST /api/integrations/reload — Hot-reload integration configs and reconnect MCP.
-pub async fn reload_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.kernel.reload_extension_mcps().await {
-        Ok(connected) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "reloaded",
-                "new_connections": connected,
-            })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7591,7 +6630,11 @@ pub async fn run_schedule(
     );
 
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
-    match state.kernel.send_message_with_handle(target_agent, &run_message, Some(kernel_handle)).await {
+    match state
+        .kernel
+        .send_message_with_handle(target_agent, &run_message, Some(kernel_handle))
+        .await
+    {
         Ok(result) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -7745,7 +6788,9 @@ pub async fn patch_agent_config(
         if name.len() > MAX_NAME_LEN {
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                Json(serde_json::json!({"error": format!("Name exceeds max length ({MAX_NAME_LEN} chars)")})),
+                Json(
+                    serde_json::json!({"error": format!("Name exceeds max length ({MAX_NAME_LEN} chars)")}),
+                ),
             );
         }
     }
@@ -7753,7 +6798,9 @@ pub async fn patch_agent_config(
         if desc.len() > MAX_DESC_LEN {
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                Json(serde_json::json!({"error": format!("Description exceeds max length ({MAX_DESC_LEN} chars)")})),
+                Json(
+                    serde_json::json!({"error": format!("Description exceeds max length ({MAX_DESC_LEN} chars)")}),
+                ),
             );
         }
     }
@@ -7761,7 +6808,9 @@ pub async fn patch_agent_config(
         if prompt.len() > MAX_PROMPT_LEN {
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                Json(serde_json::json!({"error": format!("System prompt exceeds max length ({MAX_PROMPT_LEN} chars)")})),
+                Json(
+                    serde_json::json!({"error": format!("System prompt exceeds max length ({MAX_PROMPT_LEN} chars)")}),
+                ),
             );
         }
     }
@@ -8704,6 +7753,1268 @@ pub async fn reject_request(
 }
 
 // ---------------------------------------------------------------------------
+// Platform cognitive loop endpoints
+// ---------------------------------------------------------------------------
+
+/// POST /api/platform/intent — Inject a commander intent into the slow-loop inbox.
+pub async fn platform_submit_intent(
+    State(state): State<Arc<AppState>>,
+    Json(intent): Json<CommanderIntent>,
+) -> impl IntoResponse {
+    if intent.id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "intent id is required"})),
+        );
+    }
+
+    let mut intent = intent;
+    if intent.issued_by.trim().is_empty() {
+        intent.issued_by = state.kernel.config.platform.controller_id.clone();
+    }
+
+    let mms_synced = if let Some(control) = &state.kernel.platform_control {
+        let objective = intent.objective.trim().to_string();
+        if objective.is_empty() {
+            false
+        } else {
+            control.lock().await.set_mms_objective(&objective)
+        }
+    } else {
+        false
+    };
+
+    let intent_id = intent.id.clone();
+    let issued_by = intent.issued_by.clone();
+    state.kernel.platform_intents.submit(intent);
+    state.kernel.audit_log.record(
+        &issued_by,
+        openfang_runtime::audit::AuditAction::ConfigChange,
+        "platform commander intent submitted",
+        &intent_id,
+    );
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "status": "accepted",
+            "intent_id": intent_id,
+            "pending_intents": state.kernel.platform_intents.len(),
+            "mms_synced": mms_synced,
+        })),
+    )
+}
+
+/// GET /api/platform/pending — Full tactical console snapshot: fast-loop world
+/// state, slow-loop cognitive report, intent queue, target authorizations,
+/// mission-plan approvals, and pending weapon engagements.
+pub async fn platform_pending(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let target_authorizations = state.kernel.target_authorizations.list();
+    let mission_approvals = state.kernel.mission_approvals.list();
+    let label_resolutions = state.kernel.label_resolutions.list_pending();
+    let dsl_missions = state.kernel.pending_missions.list_pending();
+    let intent_queue = state.kernel.platform_intents.list();
+    let cognitive_report = state.kernel.latest_cognitive_report.read().await.clone();
+    let planning_enabled = state.kernel.config.platform.planning.enabled;
+    // Read the live control policy (updated on config hot-reload) so the tactical
+    // console reflects controlled-side changes without a restart.
+    let control = state
+        .kernel
+        .control_policy
+        .read()
+        .map(|p| p.clone())
+        .unwrap_or_else(|_| state.kernel.config.platform.control_policy());
+
+    let (snapshot, engagement_ids, task_execution) = match &state.kernel.platform_control {
+        Some(control) => {
+            let mut control = control.lock().await;
+            let snapshot = control.latest_snapshot().cloned();
+            let engagements = control.pipeline_mut().engagement_snapshots();
+            let task_execution = control.pipeline_mut().task_execution_records();
+            (snapshot, engagements, task_execution)
+        }
+        None => (None, Vec::new(), Vec::new()),
+    };
+
+    Json(serde_json::json!({
+        "planning_enabled": planning_enabled,
+        "control": control,
+        "snapshot": snapshot,
+        "cognitive_report": cognitive_report,
+        "intent_queue": intent_queue,
+        "label_resolutions": label_resolutions,
+        "dsl_missions": dsl_missions,
+        "target_authorizations": target_authorizations,
+        "mission_approvals": mission_approvals,
+        "engagements": engagement_ids,
+        "task_execution": task_execution,
+        "pending_intents_count": state.kernel.platform_intents.len(),
+    }))
+}
+
+/// GET /api/platform/sensors — Current SMS sensor status and latest decisions.
+pub async fn platform_sensors(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let statuses = match &state.kernel.platform_control {
+        Some(control) => {
+            let control = control.lock().await;
+            control.sensor_management_statuses()
+        }
+        None => Vec::new(),
+    };
+
+    Json(serde_json::json!({
+        "available": state.kernel.platform_control.is_some(),
+        "sensors": statuses,
+    }))
+}
+
+/// GET /api/platform/label-resolutions — Pending semantic target resolutions.
+pub async fn platform_label_resolutions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "label_resolutions": state.kernel.label_resolutions.list_pending(),
+    }))
+}
+
+// ── M3-U5: Autonomy-profile and service-health endpoints ────────────────────
+
+/// GET /api/autonomy/profile — Inspect the currently active autonomy envelope
+/// plus the catalog of configured profiles. Used by the tactical dashboard's
+/// "Autonomy" panel and by automated probes that need to confirm the gate-side
+/// posture without inspecting the daemon's config file.
+pub async fn get_autonomy_profile(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let active_id = state.kernel.active_autonomy_mode_id();
+    let active_envelope = state
+        .kernel
+        .config
+        .platform
+        .autonomy
+        .profile(&active_id)
+        .cloned();
+    let overridden = state
+        .kernel
+        .autonomy_override
+        .read()
+        .ok()
+        .and_then(|g| g.is_some().then_some(true))
+        .unwrap_or(false);
+    Json(serde_json::json!({
+        "active_id": active_id,
+        "active_envelope": active_envelope,
+        "overridden_at_runtime": overridden,
+        "profiles": state.kernel.config.platform.autonomy.profiles,
+        "configured_active_id": state.kernel.config.platform.autonomy.active_profile,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct SetAutonomyProfileRequest {
+    pub id: String,
+    #[serde(default = "default_operator")]
+    pub actor: String,
+}
+
+/// PUT /api/autonomy/profile — Hot-switch the active autonomy profile.
+///
+/// Returns 400 when the id is empty or unknown (not configured under
+/// `[platform.autonomy.profiles]`). Successful switches take effect on the
+/// next fast-loop tick and are recorded in the audit log.
+pub async fn put_autonomy_profile(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetAutonomyProfileRequest>,
+) -> impl IntoResponse {
+    match state
+        .kernel
+        .set_active_autonomy_profile(&req.id, &req.actor)
+    {
+        Ok(previous) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "switched",
+                "previous_id": previous,
+                "active_id": state.kernel.active_autonomy_mode_id(),
+            })),
+        ),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err})),
+        ),
+    }
+}
+
+/// GET /api/services/health — Snapshot of the 8 deterministic cerebellum
+/// services derived from the latest [`crate::platform_control::StepReport`].
+/// Each entry reports a service id, a coarse `healthy` flag (true when the
+/// background loop has published at least one tick), and the relevant counters
+/// (PSS intents, MMS route intents, DCC reflexes, gate dispatch outcome).
+pub async fn services_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let snapshot = state.kernel.service_health_snapshot().await;
+    Json(snapshot)
+}
+
+/// GET /api/maneuver/route — Current MMS [`RoutePlan`] (legs, waypoints, reason).
+pub async fn maneuver_route(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let Some(control) = &state.kernel.platform_control else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "platform control loop not enabled"})),
+        );
+    };
+    let guard = control.lock().await;
+    match guard.latest_route_plan() {
+        Some(plan) => (StatusCode::OK, Json(serde_json::json!({"route": plan}))),
+        None => (
+            StatusCode::OK,
+            Json(serde_json::json!({"route": null, "message": "no active route plan"})),
+        ),
+    }
+}
+
+/// POST /api/maneuver/objective — Set an MMS-only maneuver objective.
+pub async fn maneuver_objective(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ManeuverObjectiveRequest>,
+) -> impl IntoResponse {
+    let objective = req.objective.trim();
+    if objective.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "objective is required"})),
+        );
+    }
+    let Some(control) = &state.kernel.platform_control else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "platform control loop not enabled"})),
+        );
+    };
+    let mut guard = control.lock().await;
+    let synced = guard.set_mms_objective(objective);
+    if !synced {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "objective did not resolve to an MMS navigation or maneuver intent"
+            })),
+        );
+    }
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "status": "accepted",
+            "mms_synced": true
+        })),
+    )
+}
+
+// ── M4-U6: Fleet federation endpoints ───────────────────────────────────────
+
+/// GET /api/federation/status — Live deterministic leader + degradation status.
+///
+/// Returns the elected leader id, the failover designate (next-priority healthy
+/// member), the current link-quality bucket, the effective autonomy profile
+/// (post-degradation), and the configured profile (pre-degradation). This is
+/// the dashboard's "who's in charge" panel and the audit log's source of truth
+/// when degradation downgrades the operator profile.
+pub async fn federation_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = state.kernel.federation_status().await;
+    let fed = &state.kernel.config.platform.federation;
+    Json(serde_json::json!({
+        "status": status,
+        "priority_order": fed.priority_order,
+        "stale_command_window_s": fed.effective_stale_window_s(),
+        "degraded_profile_configured":
+            state.kernel.config.platform.autonomy.degraded_profile,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct SetFederationLinkRequest {
+    /// New link quality bucket. Accepted values: `excellent`, `good`,
+    /// `marginal`, `poor`, `lost` (case-insensitive).
+    pub link_quality: String,
+    #[serde(default = "default_operator")]
+    pub actor: String,
+}
+
+fn parse_link_quality(raw: &str) -> Result<openfang_types::platform::LinkQuality, String> {
+    use openfang_types::platform::LinkQuality;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "excellent" => Ok(LinkQuality::Excellent),
+        "good" => Ok(LinkQuality::Good),
+        "marginal" => Ok(LinkQuality::Marginal),
+        "poor" => Ok(LinkQuality::Poor),
+        "lost" => Ok(LinkQuality::Lost),
+        other => Err(format!(
+            "unknown link_quality '{other}'. Expected one of: excellent, good, marginal, poor, lost."
+        )),
+    }
+}
+
+/// PUT /api/federation/link_quality — Operator-driven [`LinkQuality`] override
+/// used by the federation engine. Returns 400 on unknown buckets. Used by
+/// live integration tests to step through the degradation matrix without
+/// having to physically tear down the OFP link.
+pub async fn put_federation_link_quality(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetFederationLinkRequest>,
+) -> impl IntoResponse {
+    let Ok(quality) = parse_link_quality(&req.link_quality) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "unknown link_quality '{}'. Expected one of: excellent, good, marginal, poor, lost.",
+                    req.link_quality
+                )
+            })),
+        );
+    };
+    let previous = state.kernel.set_simulated_link_quality(quality, &req.actor);
+    let status = state.kernel.federation_status().await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "updated",
+            "previous": previous.as_str(),
+            "current": quality.as_str(),
+            "federation": status,
+        })),
+    )
+}
+
+#[derive(serde::Deserialize)]
+pub struct PlatformLabelResolutionConfirmRequest {
+    #[serde(default)]
+    pub track_ids: Vec<String>,
+    #[serde(default = "default_operator")]
+    pub confirmed_by: String,
+}
+
+/// POST /api/platform/label-resolutions/{id}/confirm — Apply semantic label resolution.
+pub async fn platform_confirm_label_resolution(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<PlatformLabelResolutionConfirmRequest>,
+) -> impl IntoResponse {
+    let Some(pending) = state.kernel.label_resolutions.get_pending(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "label resolution not found"})),
+        );
+    };
+    let track_ids = if req.track_ids.is_empty() {
+        pending.selected_track_ids()
+    } else {
+        req.track_ids
+            .into_iter()
+            .filter(|track_id| !track_id.trim().is_empty())
+            .collect()
+    };
+    if track_ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "no track_ids selected"})),
+        );
+    }
+    let Some(updated) = state
+        .kernel
+        .platform_intents
+        .merge_resolved_front(&pending.intent_id, &track_ids)
+    else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "intent is no longer at the front of the queue",
+                "intent_id": pending.intent_id,
+            })),
+        );
+    };
+    state.kernel.label_resolutions.mark_applied(&id);
+    state.kernel.audit_log.record(
+        &req.confirmed_by,
+        openfang_runtime::audit::AuditAction::ConfigChange,
+        format!(
+            "semantic label resolution confirmed: {}",
+            track_ids.join(",")
+        ),
+        &pending.intent_id,
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "applied",
+            "id": id,
+            "intent_id": pending.intent_id,
+            "priority_tracks": updated.priority_tracks,
+        })),
+    )
+}
+
+#[derive(serde::Deserialize)]
+pub struct PlatformLabelResolutionDismissRequest {
+    #[serde(default = "default_operator")]
+    pub dismissed_by: String,
+}
+
+/// POST /api/platform/label-resolutions/{id}/dismiss — Reject a semantic label resolution.
+pub async fn platform_dismiss_label_resolution(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<PlatformLabelResolutionDismissRequest>,
+) -> impl IntoResponse {
+    let Some(pending) = state.kernel.label_resolutions.get_pending(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "label resolution not found"})),
+        );
+    };
+    state.kernel.platform_intents.ack_next(&pending.intent_id);
+    state.kernel.label_resolutions.dismiss(&id);
+    state.kernel.audit_log.record(
+        &req.dismissed_by,
+        openfang_runtime::audit::AuditAction::ConfigChange,
+        "semantic label resolution dismissed",
+        &pending.intent_id,
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "dismissed",
+            "id": id,
+            "intent_id": pending.intent_id,
+        })),
+    )
+}
+
+// ─────────────────────────────────────────────
+// DSL mission pipeline (NL objective → Mission DSL → fast loop)
+// ─────────────────────────────────────────────
+
+/// Compile a freeform objective into a `MissionDsl` for the own platform using
+/// the current world snapshot and control policy. Shared by the preview endpoint
+/// and the kernel slow loop via `mission_compiler::compile_objective_with_semantics`.
+async fn compile_dsl_for_objective(
+    state: &AppState,
+    objective: &str,
+    snapshot: &openfang_types::platform::WorldSnapshot,
+    policy: &openfang_types::config::PlatformControlPolicy,
+    provenance: &str,
+) -> openfang_runtime::mission_compiler::ObjectiveCompileOutput {
+    let planning = &state.kernel.config.platform.planning;
+    let registry = openfang_runtime::play_registry::PlayRegistry::bundled();
+    let params = openfang_runtime::mission_compiler::CompileParams {
+        default_standoff_m: planning.default_standoff_m,
+        pid_required: planning.pid_required,
+        provenance: provenance.to_string(),
+        home: None,
+        speed_ms: None,
+        max_speed_ms: openfang_types::umaa::PlatformLimits::default().max_speed_ms,
+    };
+    let model = planning.resolved_llm_model(&state.kernel.config.default_model);
+    let semantic_driver: Option<openfang_runtime::intent_extractor::LlmIntentExtractDriver> =
+        planning.dsl_llm_extract.then(|| {
+            let driver = openfang_kernel::cognitive_loop::planning_driver_or_default(
+                planning,
+                &state.kernel.config.default_model,
+                state.kernel.default_llm_driver(),
+            );
+            openfang_runtime::intent_extractor::LlmIntentExtractDriver::new(
+                driver,
+                model,
+                Duration::from_secs(planning.llm_timeout_secs.max(1)),
+            )
+            .with_doctrine(planning.dsl_doctrine_inject.then(|| {
+                openfang_runtime::intent_extractor::mc_planning_doctrine().to_string()
+            }))
+        });
+    openfang_runtime::mission_compiler::compile_objective_with_semantics(
+        objective,
+        snapshot,
+        policy,
+        &registry,
+        &params,
+        semantic_driver
+            .as_ref()
+            .map(|driver| driver as &dyn openfang_runtime::intent_extractor::IntentExtractDriver),
+        planning.confidence_threshold,
+    )
+    .await
+}
+
+/// Read the current control policy (hot-reload aware) like `platform_pending`.
+fn current_control_policy(state: &AppState) -> openfang_types::config::PlatformControlPolicy {
+    state
+        .kernel
+        .control_policy
+        .read()
+        .map(|p| p.clone())
+        .unwrap_or_else(|_| state.kernel.config.platform.control_policy())
+}
+
+fn confirm_own_platform_id(
+    policy: &openfang_types::config::PlatformControlPolicy,
+    fallback: &str,
+) -> String {
+    if policy.own_platform_id.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        policy.own_platform_id.clone()
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct PlatformIntentPreviewRequest {
+    pub objective: String,
+    #[serde(default)]
+    pub priority_tracks: Vec<String>,
+    #[serde(default)]
+    pub priority_labels: Vec<String>,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub roe_pref: Option<openfang_types::umaa::WeaponReleaseLevel>,
+}
+
+/// POST /api/platform/intent/preview — Compile (do not dispatch) a freeform
+/// objective into a Mission DSL and return both the typed structure and the
+/// operator-facing rendered text, plus structured-intent and validation issues.
+pub async fn platform_preview_intent(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PlatformIntentPreviewRequest>,
+) -> impl IntoResponse {
+    let objective = req.objective.trim().to_string();
+    if objective.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "objective is required"})),
+        );
+    }
+    let policy = current_control_policy(&state);
+    let snapshot = match &state.kernel.platform_control {
+        Some(control) => control.lock().await.latest_snapshot().cloned(),
+        None => None,
+    };
+    let Some(snapshot) = snapshot else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "no world snapshot available yet"})),
+        );
+    };
+    let compile_text = objective_with_frontend_slots(
+        &objective,
+        &req.priority_tracks,
+        &req.priority_labels,
+        &req.constraints,
+        req.roe_pref.as_ref(),
+    );
+    let output =
+        compile_dsl_for_objective(&state, &compile_text, &snapshot, &policy, "preview").await;
+    let semantic_source = output.structured_intent.semantic_source;
+    let fallback_reason = output.structured_intent.fallback_reason.clone();
+    let rendered = output.mission.to_string();
+    let confidence = output.mission.confidence;
+    let own_id = confirm_own_platform_id(&policy, &state.kernel.config.platform.own_platform_id);
+    let trace = build_intent_trace(&compile_text, &output, &snapshot, &own_id);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "structured_intent": output.structured_intent,
+            "semantic_source": semantic_source,
+            "fallback_reason": fallback_reason,
+            "mission": output.mission,
+            "rendered": rendered,
+            "validation_issues": output.validation_issues,
+            "confidence": confidence,
+            "trace": trace,
+        })),
+    )
+}
+
+/// Short human-readable summary of a [`PlatformCommand`] for the trace UI.
+fn describe_platform_command(cmd: &openfang_types::platform::PlatformCommand) -> String {
+    use openfang_types::platform::PlatformCommand::*;
+    match cmd {
+        SetOutsideControl { platform_id } => format!("SetOutsideControl({platform_id})"),
+        SetHeading {
+            platform_id,
+            heading_deg,
+            speed_ms,
+            ..
+        } => format!("SetHeading({platform_id}, hdg={heading_deg:.0}°, spd={speed_ms:?})"),
+        SetSpeed {
+            platform_id,
+            speed_ms,
+            ..
+        } => format!("SetSpeed({platform_id}, {speed_ms:.1} m/s)"),
+        SetAltitude {
+            platform_id,
+            altitude_m,
+            ..
+        } => format!("SetAltitude({platform_id}, {altitude_m:.0} m)"),
+        GotoLocation {
+            platform_id,
+            lat,
+            lon,
+            ..
+        } => format!("GotoLocation({platform_id}, {lat:.4},{lon:.4})"),
+        FollowRoute {
+            platform_id,
+            waypoints,
+        } => format!("FollowRoute({platform_id}, {} wp)", waypoints.len()),
+        SensorOn {
+            platform_id,
+            sensor_id,
+        } => format!("SensorOn({platform_id}, {sensor_id})"),
+        SensorOff {
+            platform_id,
+            sensor_id,
+        } => format!("SensorOff({platform_id}, {sensor_id})"),
+        SensorSetMode {
+            platform_id,
+            sensor_id,
+            mode,
+        } => format!("SensorSetMode({platform_id}, {sensor_id}, {mode})"),
+        FireAtTarget {
+            platform_id,
+            weapon_id,
+            track_id,
+        } => format!("FireAtTarget({platform_id}, {weapon_id}→{track_id})"),
+        FireSalvo {
+            platform_id,
+            weapon_id,
+            track_id,
+            salvo_size,
+        } => format!("FireSalvo({platform_id}, {weapon_id}→{track_id}, n={salvo_size})"),
+        UpdateTarget {
+            platform_id,
+            track_id,
+        } => format!("Designate({platform_id}, {track_id})"),
+        CommOn { platform_id } => format!("CommOn({platform_id})"),
+        CommOff { platform_id } => format!("CommOff({platform_id})"),
+        WeaponSafeAll { platform_id } => format!("WeaponSafe({platform_id})"),
+        JamStop {
+            platform_id,
+            jammer_id,
+        } => format!("JamStop({platform_id}, {jammer_id})"),
+        other => format!(
+            "{:?}({})",
+            other.command_class(),
+            other.target_platform_id()
+        ),
+    }
+}
+
+/// Describe the deterministic MMS maneuver lane the structured intent would
+/// drive (mirror of `PlatformControlLoop::sync_mms_from_structured_intent`,
+/// pure / non-mutating for preview).
+fn maneuver_preview(
+    intent: &openfang_runtime::intent_extractor::StructuredIntent,
+) -> serde_json::Value {
+    let target = intent
+        .target_track_ids
+        .first()
+        .cloned()
+        .or_else(|| intent.target_labels.first().cloned());
+    let m = &intent.maneuver;
+    if m.flank_approach {
+        if let Some(t) = &target {
+            return serde_json::json!({
+                "lane": "mms",
+                "nav_intent": "FlankStandoff",
+                "target": t,
+                "range_m": intent.standoff_m.unwrap_or(3000.0),
+                "turn": m.turn.map(|s| format!("{s:?}")),
+                "produces": "FollowRoute",
+            });
+        }
+    }
+    if let (Some(t), Some(range)) = (&target, intent.standoff_m) {
+        return serde_json::json!({
+            "lane": "mms",
+            "nav_intent": "Standoff",
+            "target": t,
+            "range_m": range,
+            "produces": "FollowRoute",
+        });
+    }
+    if m.heading_deg.is_some()
+        || m.heading_delta_deg.is_some()
+        || m.turn.is_some()
+        || m.speed_ms.is_some()
+    {
+        return serde_json::json!({
+            "lane": "mms",
+            "nav_intent": "DirectManeuver",
+            "heading_deg": m.heading_deg,
+            "heading_delta_deg": m.heading_delta_deg,
+            "turn": m.turn.map(|s| format!("{s:?}")),
+            "speed_ms": m.speed_ms,
+            "produces": "SetHeading/SetSpeed (one-shot)",
+        });
+    }
+    // No motion/standoff slots parsed. If a target exists, this is a
+    // fire-in-place engagement: the MMS lane holds station (no maneuver). Only
+    // a truly free-form objective falls back to raw zone/route parsing.
+    if target.is_some() {
+        return serde_json::json!({
+            "lane": "mms",
+            "nav_intent": "HoldStation",
+            "target": target,
+            "produces": "（无机动，原地交战）",
+        });
+    }
+    serde_json::json!({
+        "lane": "mms",
+        "nav_intent": "RawObjective",
+        "objective": intent.raw_text,
+        "note": "MMS parses raw objective for zone/route navigation",
+    })
+}
+
+/// Assemble the end-to-end intent→command trace for the tactical console:
+/// raw intent → structured intent → mission DSL functions → fast-loop execution
+/// plan (emitted candidate commands + held functions) → MMS maneuver lane.
+fn build_intent_trace(
+    raw_text: &str,
+    output: &openfang_runtime::mission_compiler::ObjectiveCompileOutput,
+    snapshot: &openfang_types::platform::WorldSnapshot,
+    own_id: &str,
+) -> serde_json::Value {
+    let si = &output.structured_intent;
+    let mission = &output.mission;
+
+    // Stage: DSL functions (platform-bound command specs).
+    let functions: Vec<serde_json::Value> = mission
+        .functions
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "id": f.id,
+                "platform_id": f.platform_id,
+                "op": f.command.label(),
+                "lethal": f.is_lethal(),
+                "command": describe_platform_command(&f.command.to_platform_command(&f.platform_id)),
+            })
+        })
+        .collect();
+
+    // Stage: fast-loop execution plan — lower the mission against the live world.
+    let (emitted, composed, held): (
+        Vec<serde_json::Value>,
+        Vec<serde_json::Value>,
+        Vec<serde_json::Value>,
+    ) = match snapshot
+        .platforms
+        .iter()
+        .find(|p| p.id == own_id || p.name == own_id)
+    {
+        Some(own) => {
+            let plan = openfang_runtime::function_executor::FunctionExecutor::new().execute(
+                mission,
+                snapshot,
+                own,
+                snapshot.timestamp,
+            );
+            let render_intent = |ci: &openfang_types::tactical::CandidateIntent| {
+                let maneuver = is_maneuver_preview_command(&ci.command);
+                serde_json::json!({
+                    "command": describe_platform_command(&ci.command),
+                    "priority": format!("{:?}", ci.priority),
+                    "reason": ci.reason,
+                    "owned_by": if maneuver { "mms" } else { "dsl" },
+                })
+            };
+            let emitted = plan.intents.iter().map(render_intent).collect();
+            let composed = openfang_runtime::action_composer::resolve(plan.intents.clone())
+                .iter()
+                .map(render_intent)
+                .collect();
+            let held = plan
+                .held
+                .iter()
+                .map(|h| serde_json::json!({ "function_id": h.function_id, "reason": h.reason }))
+                .collect();
+            (emitted, composed, held)
+        }
+        None => (
+            Vec::new(),
+            Vec::new(),
+            vec![serde_json::json!({
+                "function_id": "*",
+                "reason": format!("own platform '{own_id}' not in snapshot — execution preview unavailable"),
+            })],
+        ),
+    };
+
+    serde_json::json!({
+        "stages": [
+            {
+                "stage": "intent",
+                "label": "操作员意图",
+                "raw_text": raw_text,
+            },
+            {
+                "stage": "structured_intent",
+                "label": "语义结构化",
+                "kind": format!("{:?}", si.kind),
+                "semantic_source": format!("{:?}", si.semantic_source),
+                "confidence": si.confidence,
+                "targets": si.target_track_ids,
+                "target_labels": si.target_labels,
+                "standoff_m": si.standoff_m,
+                "roe": si.roe.map(|r| format!("{r:?}")),
+                "fallback_reason": si.fallback_reason,
+            },
+            {
+                "stage": "mission_dsl",
+                "label": "DSL 编译",
+                "mission_kind": format!("{:?}", mission.kind),
+                "confidence": mission.confidence,
+                "functions": functions,
+                "validation_issues": output.validation_issues,
+            },
+            {
+                "stage": "execution_plan",
+                "label": "小脑执行计划（候选指令）",
+                "emitted": emitted,
+                "composed": composed,
+                "held": held,
+            },
+            {
+                "stage": "maneuver",
+                "label": "MMS 机动车道",
+                "maneuver": maneuver_preview(si),
+            },
+        ],
+    })
+}
+
+/// Local mirror of the kernel's maneuver-command classification for trace
+/// ownership labelling (motion/route commands are owned by the MMS lane).
+fn is_maneuver_preview_command(cmd: &openfang_types::platform::PlatformCommand) -> bool {
+    use openfang_types::platform::PlatformCommand::*;
+    matches!(
+        cmd,
+        SetHeading { .. }
+            | SetSpeed { .. }
+            | SetAltitude { .. }
+            | GotoLocation { .. }
+            | FollowRoute { .. }
+    )
+}
+
+fn objective_with_frontend_slots(
+    objective: &str,
+    priority_tracks: &[String],
+    priority_labels: &[String],
+    constraints: &[String],
+    roe_pref: Option<&openfang_types::umaa::WeaponReleaseLevel>,
+) -> String {
+    let mut parts = vec![objective.trim().to_string()];
+    if !priority_tracks.is_empty() {
+        parts.push(format!("priority_tracks: {}", priority_tracks.join(", ")));
+    }
+    if !priority_labels.is_empty() {
+        parts.push(format!("priority_labels: {}", priority_labels.join(", ")));
+    }
+    if !constraints.is_empty() {
+        parts.push(format!("constraints: {}", constraints.join(", ")));
+    }
+    if let Some(roe) = roe_pref {
+        parts.push(format!("roe_pref: {roe:?}"));
+    }
+    parts.join("\n")
+}
+
+/// GET /api/platform/missions — Pending DSL missions awaiting confirm/dismiss.
+pub async fn platform_missions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "missions": state.kernel.pending_missions.list_pending(),
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct PlatformMissionConfirmRequest {
+    #[serde(default = "default_operator")]
+    pub confirmed_by: String,
+}
+
+/// POST /api/platform/missions/{id}/confirm — Confirm a pending DSL mission and
+/// dispatch its functions to the fast loop as candidate intents.
+pub async fn platform_confirm_mission(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<PlatformMissionConfirmRequest>,
+) -> impl IntoResponse {
+    let Some(pending) = state.kernel.pending_missions.get(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "mission not found"})),
+        );
+    };
+    if pending.state != openfang_runtime::mission_registry::PendingMissionState::Pending {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "mission is not pending"})),
+        );
+    }
+
+    let Some(control) = &state.kernel.platform_control else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "platform control loop not enabled"})),
+        );
+    };
+    let mut guard = control.lock().await;
+    let Some(snapshot) = guard.latest_snapshot().cloned() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "no world snapshot available yet"})),
+        );
+    };
+    let policy = current_control_policy(&state);
+    let own_id = confirm_own_platform_id(&policy, &state.kernel.config.platform.own_platform_id);
+    let own = snapshot.platforms.iter().find(|p| p.id == own_id).cloned();
+    let Some(own) = own else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "own platform not present in snapshot",
+                "own_platform_id": own_id,
+            })),
+        );
+    };
+
+    let executor = openfang_runtime::function_executor::FunctionExecutor::new();
+    let plan = executor.execute(&pending.mission, &snapshot, &own, snapshot.timestamp);
+    let emitted = plan.intents.len();
+    let submit_at = guard.now_secs();
+    for mut ci in plan.intents {
+        ci.issued_at = submit_at;
+        guard.submit_intent(ci);
+    }
+    drop(guard);
+
+    state.kernel.pending_missions.confirm(&id);
+    state.kernel.audit_log.record(
+        &req.confirmed_by,
+        openfang_runtime::audit::AuditAction::ConfigChange,
+        format!("DSL mission confirmed & dispatched: {id} ({emitted} intents)"),
+        &id,
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "dispatched",
+            "id": id,
+            "emitted_intents": emitted,
+            "held": plan.held.iter().map(|h| serde_json::json!({
+                "function_id": h.function_id,
+                "reason": h.reason,
+            })).collect::<Vec<_>>(),
+        })),
+    )
+}
+
+#[derive(serde::Deserialize)]
+pub struct PlatformMissionDismissRequest {
+    #[serde(default = "default_operator")]
+    pub dismissed_by: String,
+}
+
+/// POST /api/platform/missions/{id}/dismiss — Reject a pending DSL mission.
+pub async fn platform_dismiss_mission(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<PlatformMissionDismissRequest>,
+) -> impl IntoResponse {
+    let Some(_pending) = state.kernel.pending_missions.dismiss(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "pending mission not found"})),
+        );
+    };
+    state.kernel.audit_log.record(
+        &req.dismissed_by,
+        openfang_runtime::audit::AuditAction::ConfigChange,
+        "DSL mission dismissed",
+        &id,
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "dismissed", "id": id})),
+    )
+}
+
+#[cfg(test)]
+mod dsl_route_tests {
+    use super::*;
+    use openfang_types::config::{ControlledSide, PlatformControlPolicy, ThreatSide};
+
+    #[test]
+    fn confirm_own_platform_id_prefers_current_policy() {
+        let policy = PlatformControlPolicy {
+            controlled_side: ControlledSide::Red,
+            threat_side: ThreatSide::Opposite,
+            controlled_platforms: vec!["hot-uav".into()],
+            own_platform_id: "hot-uav".into(),
+            controller_id: "operator".into(),
+            ..Default::default()
+        };
+
+        assert_eq!(confirm_own_platform_id(&policy, "stale-uav"), "hot-uav");
+    }
+
+    #[test]
+    fn confirm_own_platform_id_falls_back_when_policy_empty() {
+        let policy = PlatformControlPolicy {
+            controlled_side: ControlledSide::Red,
+            threat_side: ThreatSide::Opposite,
+            controlled_platforms: vec![],
+            own_platform_id: String::new(),
+            controller_id: "operator".into(),
+            ..Default::default()
+        };
+
+        assert_eq!(confirm_own_platform_id(&policy, "config-uav"), "config-uav");
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct PlatformApproveRequest {
+    pub approval_id: String,
+    #[serde(default = "default_operator")]
+    pub approved_by: String,
+}
+
+/// POST /api/platform/approve — Approve a pending mission/task approval request.
+pub async fn platform_approve(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PlatformApproveRequest>,
+) -> impl IntoResponse {
+    let uuid = match uuid::Uuid::parse_str(&req.approval_id) {
+        Ok(uuid) => uuid,
+        Err(_) => {
+            if !req.approval_id.starts_with("intervention:") {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Invalid approval ID"})),
+                );
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            state.kernel.mission_approvals.approve(
+                req.approval_id.clone(),
+                req.approved_by.clone(),
+                now,
+            );
+            state.kernel.audit_log.record(
+                &req.approved_by,
+                openfang_runtime::audit::AuditAction::ConfigChange,
+                "platform intervention approved",
+                &req.approval_id,
+            );
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": req.approval_id,
+                    "status": "approved",
+                    "approved_by": req.approved_by,
+                    "approved_at": now,
+                })),
+            );
+        }
+    };
+
+    match state.kernel.approval_manager.resolve(
+        uuid,
+        openfang_types::approval::ApprovalDecision::Approved,
+        Some(req.approved_by),
+    ) {
+        Ok(resp) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": resp.request_id,
+                "status": "approved",
+                "decided_at": resp.decided_at.to_rfc3339(),
+            })),
+        ),
+        Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct MissionApproveRequest {
+    /// Plan fingerprint (from `cognitive_report.pending_approval_id`).
+    pub plan_id: String,
+    #[serde(default = "default_operator")]
+    pub approved_by: String,
+}
+
+/// POST /api/platform/missions/approve — Approve a slow-loop mission plan by its
+/// content fingerprint. The next planning cycle releases the plan once the
+/// required quorum of signatures is recorded.
+pub async fn platform_approve_mission(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MissionApproveRequest>,
+) -> impl IntoResponse {
+    if req.plan_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "plan_id is required"})),
+        );
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    state
+        .kernel
+        .mission_approvals
+        .approve(req.plan_id.clone(), req.approved_by.clone(), now);
+    state.kernel.audit_log.record(
+        &req.approved_by,
+        openfang_runtime::audit::AuditAction::ConfigChange,
+        "platform mission plan approved",
+        &req.plan_id,
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "approved",
+            "plan_id": req.plan_id,
+            "approved_by": req.approved_by,
+        })),
+    )
+}
+
+#[derive(serde::Deserialize)]
+pub struct TargetAuthorizeRequest {
+    pub platform_id: String,
+    pub track_id: String,
+    #[serde(default = "default_operator")]
+    pub authorized_by: String,
+    #[serde(default)]
+    pub authorized_at: Option<f64>,
+}
+
+/// POST /api/platform/targets/authorize — Authorize a target once for automatic closure.
+pub async fn platform_authorize_target(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TargetAuthorizeRequest>,
+) -> impl IntoResponse {
+    if req.platform_id.trim().is_empty() || req.track_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "platform_id and track_id are required"})),
+        );
+    }
+
+    let authorized_at = req
+        .authorized_at
+        .unwrap_or_else(|| chrono::Utc::now().timestamp() as f64);
+    if let Some(control) = &state.kernel.platform_control {
+        let mut control = control.lock().await;
+        control.authorize_target(
+            &req.platform_id,
+            &req.track_id,
+            &req.authorized_by,
+            authorized_at,
+        );
+    } else {
+        state.kernel.target_authorizations.authorize(
+            &req.platform_id,
+            &req.track_id,
+            &req.authorized_by,
+            authorized_at,
+        );
+    }
+    state.kernel.audit_log.record(
+        &req.authorized_by,
+        openfang_runtime::audit::AuditAction::CapabilityCheck,
+        "platform target authorized",
+        format!("{}:{}", req.platform_id, req.track_id),
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "authorized",
+            "platform_id": req.platform_id,
+            "track_id": req.track_id,
+            "authorized_by": req.authorized_by,
+            "authorized_at": authorized_at,
+        })),
+    )
+}
+
+#[derive(serde::Deserialize)]
+pub struct EngagementSignRequest {
+    #[serde(default = "default_operator")]
+    pub signer: String,
+    #[serde(default = "default_launch_after_sign")]
+    pub launch_if_ready: bool,
+}
+
+/// POST /api/platform/engagements/{id}/sign — Sign and optionally launch an engagement.
+pub async fn platform_sign_engagement(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<EngagementSignRequest>,
+) -> impl IntoResponse {
+    let Some(control) = &state.kernel.platform_control else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "platform control loop unavailable"})),
+        );
+    };
+
+    let mut control = control.lock().await;
+    let Some(engagement_state) = control.pipeline_mut().sign(&id, &req.signer) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "No pending engagement with that id"})),
+        );
+    };
+    let latest_snapshot = control.latest_snapshot().cloned();
+    let launched = if req.launch_if_ready {
+        control
+            .pipeline_mut()
+            .launch_if_ready_with_snapshot(&id, latest_snapshot.as_ref())
+            .await
+    } else {
+        false
+    };
+    let final_state = control
+        .pipeline_mut()
+        .engagement_state(&id)
+        .unwrap_or(engagement_state);
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "id": id,
+            "state": final_state,
+            "signed_by": req.signer,
+            "launched": launched,
+            "launch_stage": if launched { "launched" } else { "not_launched" },
+        })),
+    )
+}
+
+fn default_operator() -> String {
+    "api".into()
+}
+
+fn default_launch_after_sign() -> bool {
+    true
+}
+
+// ---------------------------------------------------------------------------
 // Config Reload endpoint
 // ---------------------------------------------------------------------------
 
@@ -8753,12 +9064,18 @@ pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoRespo
 // ---------------------------------------------------------------------------
 
 /// GET /api/config/schema — Return a simplified JSON description of the config structure.
-pub async fn config_schema(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Build provider/model options from model catalog for dropdowns
-    let catalog = state.kernel.model_catalog.read().unwrap_or_else(|e| e.into_inner());
-    let provider_options: Vec<String> = catalog.list_providers().iter().map(|p| p.id.clone()).collect();
+    let catalog = state
+        .kernel
+        .model_catalog
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    let provider_options: Vec<String> = catalog
+        .list_providers()
+        .iter()
+        .map(|p| p.id.clone())
+        .collect();
     let model_options: Vec<serde_json::Value> = catalog
         .list_models()
         .iter()
@@ -9021,13 +9338,13 @@ pub async fn get_agent_deliveries(
         .unwrap_or(50)
         .min(500);
 
-    let receipts = state.kernel.delivery_tracker.get_receipts(agent_id, limit);
+    let _ = limit;
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "agent_id": agent_id.to_string(),
-            "count": receipts.len(),
-            "receipts": receipts,
+            "count": 0,
+            "receipts": [],
         })),
     )
 }
@@ -9611,8 +9928,7 @@ pub async fn copilot_oauth_start() -> impl IntoResponse {
                 CopilotFlowState {
                     device_code: resp.device_code,
                     interval: resp.interval,
-                    expires_at: Instant::now()
-                        + std::time::Duration::from_secs(resp.expires_in),
+                    expires_at: Instant::now() + std::time::Duration::from_secs(resp.expires_in),
                 },
             );
 
@@ -9676,7 +9992,9 @@ pub async fn copilot_oauth_poll(
             if let Err(e) = write_secret_env(&secrets_path, "GITHUB_TOKEN", &access_token) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"status": "error", "error": format!("Failed to save token: {e}")})),
+                    Json(
+                        serde_json::json!({"status": "error", "error": format!("Failed to save token: {e}")}),
+                    ),
                 );
             }
 
@@ -9880,15 +10198,30 @@ fn audit_to_comms_event(
             // Format detail: "tokens_in=X, tokens_out=Y" → readable summary
             let detail = if entry.detail.starts_with("tokens_in=") {
                 let parts: Vec<&str> = entry.detail.split(", ").collect();
-                let in_tok = parts.first().and_then(|p| p.strip_prefix("tokens_in=")).unwrap_or("?");
-                let out_tok = parts.get(1).and_then(|p| p.strip_prefix("tokens_out=")).unwrap_or("?");
+                let in_tok = parts
+                    .first()
+                    .and_then(|p| p.strip_prefix("tokens_in="))
+                    .unwrap_or("?");
+                let out_tok = parts
+                    .get(1)
+                    .and_then(|p| p.strip_prefix("tokens_out="))
+                    .unwrap_or("?");
                 if entry.outcome == "ok" {
                     format!("{} in / {} out tokens", in_tok, out_tok)
                 } else {
-                    format!("{} in / {} out — {}", in_tok, out_tok, openfang_types::truncate_str(&entry.outcome, 80))
+                    format!(
+                        "{} in / {} out — {}",
+                        in_tok,
+                        out_tok,
+                        openfang_types::truncate_str(&entry.outcome, 80)
+                    )
                 }
             } else if entry.outcome != "ok" {
-                format!("{} — {}", openfang_types::truncate_str(&entry.detail, 80), openfang_types::truncate_str(&entry.outcome, 80))
+                format!(
+                    "{} — {}",
+                    openfang_types::truncate_str(&entry.detail, 80),
+                    openfang_types::truncate_str(&entry.outcome, 80)
+                )
             } else {
                 openfang_types::truncate_str(&entry.detail, 200).to_string()
             };
@@ -9896,12 +10229,18 @@ fn audit_to_comms_event(
         }
         "AgentSpawn" => (
             CommsEventKind::AgentSpawned,
-            format!("Agent spawned: {}", openfang_types::truncate_str(&entry.detail, 100)),
+            format!(
+                "Agent spawned: {}",
+                openfang_types::truncate_str(&entry.detail, 100)
+            ),
             "",
         ),
         "AgentKill" => (
             CommsEventKind::AgentTerminated,
-            format!("Agent killed: {}", openfang_types::truncate_str(&entry.detail, 100)),
+            format!(
+                "Agent killed: {}",
+                openfang_types::truncate_str(&entry.detail, 100)
+            ),
             "",
         ),
         _ => return None,
@@ -9913,8 +10252,16 @@ fn audit_to_comms_event(
         kind,
         source_id: entry.agent_id.clone(),
         source_name: resolve_name(&entry.agent_id),
-        target_id: if target_label.is_empty() { String::new() } else { target_label.to_string() },
-        target_name: if target_label.is_empty() { String::new() } else { target_label.to_string() },
+        target_id: if target_label.is_empty() {
+            String::new()
+        } else {
+            target_label.to_string()
+        },
+        target_name: if target_label.is_empty() {
+            String::new()
+        } else {
+            target_label.to_string()
+        },
         detail,
     })
 }
@@ -9965,9 +10312,7 @@ pub async fn comms_events(
 /// GET /api/comms/events/stream — SSE stream of inter-agent communication events.
 ///
 /// Polls the audit log every 500ms for new inter-agent events.
-pub async fn comms_events_stream(
-    State(state): State<Arc<AppState>>,
-) -> axum::response::Response {
+pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
 
     let (tx, rx) = tokio::sync::mpsc::channel::<

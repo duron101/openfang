@@ -358,6 +358,7 @@ mod tests {
                 exec_policy: None,
                 tool_allowlist: vec![],
                 tool_blocklist: vec![],
+                tactical_policy: None,
             },
             state: AgentState::Created,
             mode: AgentMode::default(),

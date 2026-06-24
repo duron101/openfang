@@ -160,6 +160,10 @@
               <span class="nav-icon"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span>
               <span class="nav-label">Runtime</span>
             </a>
+            <a class="nav-item" :class="{ active: page === 'tactical' }" @click="navigate('tactical')" :aria-current="page === 'tactical' ? 'page' : false">
+              <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg></span>
+              <span class="nav-label">Tactical</span>
+            </a>
             <a class="nav-item" :class="{ active: page === 'settings' }" @click="navigate('settings')" :aria-current="page === 'settings' ? 'page' : false">
               <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></svg></span>
               <span class="nav-label">Settings</span>
@@ -4730,6 +4734,550 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 
             <div class="flex gap-2">
               <button class="btn btn-ghost btn-sm" @click="loadData()">Refresh</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- Page: Tactical -->
+    <template x-if="page === 'tactical'">
+      <div x-data="tacticalPage" x-init="loadData().then(() => startAutoRefresh())" @page-leave.window="stopAutoRefresh()">
+        <div class="page-header">
+          <h2>Tactical Console</h2>
+          <div class="flex gap-2 items-center">
+            <span class="badge" :class="planningEnabled ? 'badge-success' : 'badge-dim'" x-text="planningEnabled ? 'Slow loop ON' : 'Slow loop OFF'"></span>
+            <span class="text-xs text-dim" x-show="snapshot">t=<span x-text="num(snapshot && snapshot.timestamp, 1)"></span>s</span>
+            <button class="btn btn-ghost btn-sm" @click="loadData()">Refresh</button>
+          </div>
+        </div>
+        <div class="page-body">
+          <div x-show="loading" class="loading-state"><div class="spinner"></div><span>Loading tactical state...</span></div>
+          <div x-show="loadError" class="card" style="border-color:var(--danger);margin-bottom:16px">
+            <div class="card-header" style="color:var(--danger)">Unavailable</div>
+            <div style="padding:8px 0" x-text="loadError"></div>
+          </div>
+
+          <div x-show="!loading">
+            <!-- 0. Control scope (from config) -->
+            <div class="card" style="margin-bottom:16px" x-show="control">
+              <div class="card-header">0 · Control Scope — 控制方 / 控制对象</div>
+              <div class="grid grid-cols-2" style="gap:12px;margin-top:8px;font-size:13px">
+                <div>
+                  <div class="text-xs text-dim">控制方 (controlled_side)</div>
+                  <div><span class="badge badge-success" x-text="control && control.controlled_side"></span>
+                    <span class="text-xs text-dim" style="margin-left:6px">威胁方: <span x-text="control && control.threat_side"></span></span>
+                  </div>
+                </div>
+                <div>
+                  <div class="text-xs text-dim">控制对象 (controlled_platforms)</div>
+                  <div x-show="control && control.controlled_platforms && control.controlled_platforms.length">
+                    <template x-for="pid in control.controlled_platforms" :key="pid">
+                      <span class="badge badge-dim" style="margin-right:4px" x-text="pid"></span>
+                    </template>
+                  </div>
+                  <div class="text-xs text-dim" x-show="!control || !control.controlled_platforms || !control.controlled_platforms.length">该控制方下全部实体</div>
+                </div>
+                <div>
+                  <div class="text-xs text-dim">DCC 本机 (own_platform_id)</div>
+                  <div x-text="control && control.own_platform_id"></div>
+                </div>
+                <div>
+                  <div class="text-xs text-dim">控制方标识 (controller_id)</div>
+                  <div x-text="control && control.controller_id"></div>
+                </div>
+              </div>
+              <div class="text-xs text-dim" style="margin-top:8px" x-text="controlScopeLabel"></div>
+            </div>
+
+            <!-- M3-U5: Autonomy profile (envelope + hot-switch) -->
+            <div id="tacticalAutonomyPanel" class="card" style="margin-bottom:16px" x-show="autonomy && autonomy.profiles && autonomy.profiles.length">
+              <div class="card-header">0.5 · Autonomy Profile — 自治档位</div>
+              <div class="grid grid-cols-2" style="gap:12px;margin-top:8px;font-size:13px">
+                <div>
+                  <div class="text-xs text-dim">活动档位 (active profile)</div>
+                  <div>
+                    <span class="badge badge-success" x-text="autonomy.activeId || '—'"></span>
+                    <span class="badge badge-dim" style="margin-left:6px" x-show="autonomy.overriddenAtRuntime">运行时覆盖</span>
+                  </div>
+                  <div class="text-xs text-dim" style="margin-top:4px" x-text="autonomy.envelope ? (autonomy.envelope.description || '') : ''"></div>
+                </div>
+                <div>
+                  <div class="text-xs text-dim">武器处置 / ROE 上限</div>
+                  <div>
+                    <span class="badge badge-dim" x-text="autonomy.envelope ? autonomy.envelope.weapon_disposition : '—'"></span>
+                    <span class="badge badge-dim" style="margin-left:6px" x-text="autonomy.envelope ? autonomy.envelope.max_weapon_release : '—'"></span>
+                    <span class="badge" :class="(autonomy.envelope && autonomy.envelope.allow_defensive_reflex) ? 'badge-success' : 'badge-dim'" style="margin-left:6px">
+                      reflex <span x-text="(autonomy.envelope && autonomy.envelope.allow_defensive_reflex) ? 'on' : 'off'"></span>
+                    </span>
+                  </div>
+                </div>
+                <div style="grid-column:1 / span 2">
+                  <div class="text-xs text-dim">切换档位 (hot-swap)</div>
+                  <div class="flex gap-2 items-center" style="flex-wrap:wrap">
+                    <template x-for="prof in autonomy.profiles" :key="prof.id">
+                      <button class="btn btn-sm"
+                              :class="prof.id === autonomy.activeId ? 'btn-primary' : 'btn-ghost'"
+                              :disabled="autonomySwitching || prof.id === autonomy.activeId"
+                              @click="switchAutonomyProfile(prof.id)">
+                        <span x-text="prof.id"></span>
+                      </button>
+                    </template>
+                    <span class="text-xs text-dim" x-show="autonomySwitching">切换中...</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- M3-U5: Cerebellum service health (8 deterministic services) -->
+            <div id="tacticalServiceHealth" class="card" style="margin-bottom:16px" x-show="serviceHealth && serviceHealth.services && serviceHealth.services.length">
+              <div class="card-header">
+                0.6 · Cerebellum Services — 8 大确定性服务
+                <span class="badge" :class="serviceHealth.polled ? 'badge-success' : 'badge-dim'" style="margin-left:6px" x-text="serviceHealth.polled ? 'polling' : 'idle'"></span>
+              </div>
+              <div class="grid grid-cols-2" style="gap:8px;margin-top:8px;font-size:12px">
+                <template x-for="svc in serviceHealth.services" :key="svc.id">
+                  <div style="border:1px solid var(--border);border-radius:4px;padding:6px 8px">
+                    <div class="flex items-center justify-between">
+                      <div>
+                        <span class="badge" :class="svc.healthy ? 'badge-success' : 'badge-dim'" x-text="svc.id"></span>
+                        <span class="text-xs" style="margin-left:6px" x-text="svc.name"></span>
+                      </div>
+                    </div>
+                    <div class="text-xs text-dim" style="margin-top:4px">
+                      <span x-show="svc.pss_intents !== undefined">PSS intents: <span x-text="svc.pss_intents"></span> · </span>
+                      <span x-show="svc.dcc_intents !== undefined">DCC intents: <span x-text="svc.dcc_intents"></span> · </span>
+                      <span x-show="svc.fused_tracks !== undefined">tracks: <span x-text="svc.fused_tracks"></span> · </span>
+                      <span x-show="svc.survivors_after_screen !== undefined">survivors: <span x-text="svc.survivors_after_screen"></span></span>
+                      <span x-show="svc.pipeline && svc.pipeline.approved !== undefined">approved: <span x-text="svc.pipeline.approved"></span> · rejected: <span x-text="svc.pipeline.rejected"></span></span>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <!-- M4-U6: Fleet federation status + degradation matrix -->
+            <div id="tacticalFederationPanel" class="card" style="margin-bottom:16px" x-show="federation && federation.status">
+              <div class="card-header">
+                0.7 · Fleet Federation — 编队联邦大脑
+                <template x-if="federation.status">
+                  <span class="badge" :class="federation.status.is_leader ? 'badge-success' : 'badge-dim'" style="margin-left:6px" x-text="federation.status.is_leader ? 'leader' : 'member'"></span>
+                </template>
+                <template x-if="federation.status && federation.status.degraded">
+                  <span class="badge badge-danger" style="margin-left:6px">degraded</span>
+                </template>
+              </div>
+              <div class="grid grid-cols-2" style="gap:12px;margin-top:8px;font-size:12px">
+                <div style="border:1px solid var(--border);border-radius:4px;padding:8px">
+                  <div class="text-xs text-dim">Local id</div>
+                  <div style="font-weight:600" x-text="federation.status ? federation.status.local_id : '—'"></div>
+                  <div class="text-xs text-dim" style="margin-top:6px">Leader</div>
+                  <div style="font-weight:600" x-text="federation.status ? (federation.status.leader_id || '—') : '—'"></div>
+                  <div class="text-xs text-dim" style="margin-top:6px">Failover designate</div>
+                  <div x-text="federation.status ? (federation.status.failover_designate || '—') : '—'"></div>
+                  <div class="text-xs text-dim" style="margin-top:6px">Reason</div>
+                  <div class="text-xs" x-text="federation.status ? federation.status.reason : ''"></div>
+                </div>
+                <div style="border:1px solid var(--border);border-radius:4px;padding:8px">
+                  <div class="text-xs text-dim">Link quality</div>
+                  <div class="flex flex-wrap gap-2" style="margin-top:4px">
+                    <template x-for="lq in federationLinkChoices" :key="lq">
+                      <button
+                        class="btn btn-sm"
+                        :class="(federation.status && federation.status.link_quality === lq) ? 'btn-primary' : 'btn-ghost'"
+                        :disabled="federationLinkUpdating || (federation.status && federation.status.link_quality === lq)"
+                        @click="setFederationLinkQuality(lq)"
+                        x-text="lq">
+                      </button>
+                    </template>
+                  </div>
+                  <div class="text-xs text-dim" style="margin-top:8px">Effective profile</div>
+                  <div>
+                    <span class="badge" :class="(federation.status && federation.status.degraded) ? 'badge-danger' : 'badge-success'" x-text="federation.status ? federation.status.effective_profile : '—'"></span>
+                    <span class="text-xs text-dim" style="margin-left:6px" x-show="federation.status && federation.status.degraded">(was <span x-text="federation.status.configured_profile"></span>)</span>
+                  </div>
+                  <div class="text-xs text-dim" style="margin-top:8px">Priority order</div>
+                  <div class="text-xs" x-text="(federation.priorityOrder && federation.priorityOrder.length) ? federation.priorityOrder.join(' → ') : 'not configured'"></div>
+                  <div class="text-xs text-dim" style="margin-top:6px">
+                    Stale command window: <span x-text="federation.staleCommandWindowS"></span>s
+                    · Degraded profile: <span x-text="federation.degradedProfileConfigured || 'none'"></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 1. Intent injection -->
+            <div class="card" style="margin-bottom:16px">
+              <div class="card-header">1 · Intent Injection</div>
+              <div class="grid grid-cols-2" style="gap:12px;margin-top:8px">
+                <div>
+                  <label class="text-xs text-dim">Objective</label>
+                  <input class="input" type="text" x-model="form.objective" placeholder="e.g. Interdict hostile contacts north of patrol box">
+                </div>
+                <div>
+                  <label class="text-xs text-dim">Priority tracks (comma-separated)</label>
+                  <input class="input" type="text" x-model="form.priority_tracks" placeholder="trk-1, trk-3">
+                </div>
+                <div>
+                  <label class="text-xs text-dim">Priority labels (comma-separated)</label>
+                  <input class="input" type="text" x-model="form.priority_labels" placeholder="蓝方指挥所, 来袭导弹">
+                </div>
+                <div>
+                  <label class="text-xs text-dim">Constraints (comma-separated)</label>
+                  <input class="input" type="text" x-model="form.constraints" placeholder="hold_fire_until_authorized">
+                </div>
+                <div>
+                  <label class="text-xs text-dim">Issued by</label>
+                  <input class="input" type="text" x-model="form.issued_by" placeholder="operator">
+                </div>
+              </div>
+              <div class="flex gap-2 items-center" style="margin-top:12px">
+                <button class="btn btn-primary btn-sm" @click="submitIntent()" :disabled="submitting" x-text="submitting ? 'Submitting...' : 'Inject Intent'"></button>
+                <button class="btn btn-ghost btn-sm" @click="previewIntent()" :disabled="previewing" x-text="previewing ? 'Compiling...' : 'Compile DSL Preview'"></button>
+                <span class="text-xs text-dim">Queued intents: <span x-text="pendingIntentsCount"></span></span>
+              </div>
+
+              <!-- DSL preview (compile-only, no dispatch) -->
+              <div x-show="preview" class="card" style="border-color:var(--accent);margin-top:10px">
+                <div class="flex items-center justify-between">
+                  <div class="text-sm" style="font-weight:600">Mission DSL Preview
+                    <span class="badge badge-dim" x-show="preview && preview.mission" x-text="preview && preview.mission ? preview.mission.kind : ''"></span>
+                    <span class="badge" :class="(preview && preview.confidence >= 0.5) ? 'badge-success' : 'badge-danger'" x-text="preview ? ('conf ' + pct(preview.confidence)) : ''"></span>
+                  </div>
+                  <button class="btn btn-ghost btn-sm" @click="clearPreview()">Close</button>
+                </div>
+                <pre class="text-xs" style="white-space:pre-wrap;background:var(--bg);padding:8px;border-radius:4px;margin-top:8px;max-height:320px;overflow:auto" x-text="preview ? preview.rendered : ''"></pre>
+                <div x-show="preview && preview.validation_issues && preview.validation_issues.length" style="margin-top:6px">
+                  <div class="text-xs" style="color:var(--warning);font-weight:600">Validation issues</div>
+                  <template x-for="vi in (preview ? preview.validation_issues : [])" :key="vi.rule + vi.message">
+                    <div class="text-xs text-dim">• <strong x-text="vi.rule"></strong>: <span x-text="vi.message"></span></div>
+                  </template>
+                </div>
+
+                <!-- 意图 → 指令 全链路转化 trace -->
+                <div x-show="preview && preview.trace && preview.trace.stages" style="margin-top:12px">
+                  <div class="text-sm" style="font-weight:600;margin-bottom:8px">意图 → 指令 全链路转化</div>
+                  <div class="intent-trace">
+                    <template x-for="(st, si) in (preview && preview.trace ? preview.trace.stages : [])" :key="st.stage">
+                      <div class="trace-stage">
+                        <div class="trace-stage-head">
+                          <span class="trace-step" x-text="(si + 1)"></span>
+                          <span class="trace-label" x-text="st.label"></span>
+                          <span class="badge badge-dim" x-show="st.kind" x-text="st.kind"></span>
+                          <span class="badge badge-dim" x-show="st.mission_kind" x-text="st.mission_kind"></span>
+                          <span class="badge" x-show="st.semantic_source" x-text="st.semantic_source"></span>
+                          <span class="badge" :class="(st.confidence >= 0.5) ? 'badge-success' : 'badge-danger'" x-show="st.confidence !== undefined" x-text="'conf ' + pct(st.confidence)"></span>
+                        </div>
+
+                        <!-- intent -->
+                        <div x-show="st.stage === 'intent'" class="trace-body text-xs" style="white-space:pre-wrap" x-text="st.raw_text"></div>
+
+                        <!-- structured intent -->
+                        <div x-show="st.stage === 'structured_intent'" class="trace-body text-xs">
+                          <div>目标: <span x-text="([...new Set([...(st.targets||[]), ...(st.target_labels||[])])].join(', ')) || '—'"></span></div>
+                          <div x-show="st.standoff_m !== null && st.standoff_m !== undefined">退避距离: <span x-text="st.standoff_m + ' m'"></span></div>
+                          <div x-show="st.roe">ROE: <span x-text="st.roe"></span></div>
+                          <div x-show="st.fallback_reason" style="color:var(--warning)">回退: <span x-text="st.fallback_reason"></span></div>
+                        </div>
+
+                        <!-- mission DSL functions -->
+                        <div x-show="st.stage === 'mission_dsl'" class="trace-body">
+                          <div x-show="!(st.functions && st.functions.length)" class="text-xs text-dim">（无函数）</div>
+                          <template x-for="(fn, fi) in (st.functions || [])" :key="fi">
+                            <div class="text-xs trace-cmd">
+                              <span class="badge" :class="fn.lethal ? 'badge-danger' : 'badge-dim'" x-text="fn.op"></span>
+                              <span x-text="fn.command"></span>
+                            </div>
+                          </template>
+                        </div>
+
+                        <!-- execution plan -->
+                        <div x-show="st.stage === 'execution_plan'" class="trace-body">
+                          <div class="text-xs text-dim" x-show="st.emitted && st.emitted.length" style="margin-bottom:4px">候选指令</div>
+                          <div x-show="!(st.emitted && st.emitted.length)" class="text-xs text-dim">（无候选指令上线）</div>
+                          <template x-for="(em, ei) in (st.emitted || [])" :key="ei">
+                            <div class="text-xs trace-cmd">
+                              <span class="badge" :class="em.owned_by === 'mms' ? 'badge-dim' : 'badge-success'" x-text="em.owned_by"></span>
+                              <span x-text="em.command"></span>
+                              <span class="text-dim" x-text="'· ' + em.priority"></span>
+                            </div>
+                          </template>
+                          <div x-show="st.composed && st.composed.length" class="text-xs text-dim" style="margin:8px 0 4px">合成后实发</div>
+                          <template x-for="(em, ei) in (st.composed || [])" :key="'c' + ei">
+                            <div class="text-xs trace-cmd">
+                              <span class="badge" :class="em.owned_by === 'mms' ? 'badge-dim' : 'badge-success'" x-text="em.owned_by"></span>
+                              <span x-text="em.command"></span>
+                              <span class="text-dim" x-text="'· ' + em.priority"></span>
+                            </div>
+                          </template>
+                          <template x-for="(h, hi) in (st.held || [])" :key="hi">
+                            <div class="text-xs trace-cmd" style="color:var(--warning)">
+                              <span class="badge badge-danger">HELD</span>
+                              <span x-text="h.function_id + ': ' + h.reason"></span>
+                            </div>
+                          </template>
+                        </div>
+
+                        <!-- maneuver lane -->
+                        <div x-show="st.stage === 'maneuver'" class="trace-body text-xs">
+                          <div>NavIntent: <strong x-text="st.maneuver ? st.maneuver.nav_intent : ''"></strong></div>
+                          <div x-show="st.maneuver && st.maneuver.target">目标: <span x-text="st.maneuver && st.maneuver.target"></span></div>
+                          <div x-show="st.maneuver && st.maneuver.objective" class="text-dim">原始目标: <span x-text="st.maneuver && st.maneuver.objective"></span></div>
+                          <div x-show="st.maneuver && st.maneuver.produces">产出: <span x-text="st.maneuver && st.maneuver.produces"></span></div>
+                          <div x-show="st.maneuver && (st.maneuver.heading_deg || st.maneuver.heading_delta_deg || st.maneuver.turn || st.maneuver.speed_ms)" class="text-dim">
+                            <span x-show="st.maneuver && st.maneuver.heading_deg" x-text="'hdg ' + (st.maneuver && st.maneuver.heading_deg) + '° '"></span>
+                            <span x-show="st.maneuver && st.maneuver.turn" x-text="'turn ' + (st.maneuver && st.maneuver.turn) + ' '"></span>
+                            <span x-show="st.maneuver && st.maneuver.speed_ms" x-text="'spd ' + (st.maneuver && st.maneuver.speed_ms) + 'm/s'"></span>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+              <div x-show="intentQueue.length" style="margin-top:10px">
+                <table class="table">
+                  <thead><tr><th>ID</th><th>Objective</th><th>Tracks</th><th>Labels</th><th>By</th></tr></thead>
+                  <tbody>
+                    <template x-for="it in intentQueue" :key="it.id">
+                      <tr>
+                        <td class="text-xs" x-text="it.id"></td>
+                        <td x-text="it.objective"></td>
+                        <td class="text-xs" x-text="(it.priority_tracks || []).join(', ') || '—'"></td>
+                        <td class="text-xs" x-text="(it.priority_labels || []).join(', ') || '—'"></td>
+                        <td class="text-xs" x-text="it.issued_by"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+              <div x-show="labelResolutions.length" class="card" style="border-color:var(--warning);margin-top:10px">
+                <div class="text-sm" style="font-weight:600;margin-bottom:6px">Label resolutions awaiting confirmation</div>
+                <template x-for="lr in labelResolutions" :key="lr.id">
+                  <div style="border-top:1px solid var(--border);padding:8px 0">
+                    <div class="flex items-center justify-between">
+                      <div>
+                        <div class="text-xs text-dim">Intent <code x-text="lr.intent_id"></code></div>
+                        <div class="text-sm" x-text="lr.objective"></div>
+                      </div>
+                      <div class="flex gap-2">
+                        <button class="btn btn-primary btn-sm" @click="confirmLabelResolution(lr.id)">Confirm</button>
+                        <button class="btn btn-ghost btn-sm" @click="dismissLabelResolution(lr.id)">Dismiss</button>
+                      </div>
+                    </div>
+                    <template x-for="res in (lr.resolutions || [])" :key="lr.id + res.label">
+                      <div style="margin-top:6px">
+                        <div class="text-xs">Label: <strong x-text="res.label"></strong> → <code x-text="res.selected_track_id || 'unresolved'"></code></div>
+                        <template x-for="c in (res.candidates || []).slice(0, 3)" :key="res.label + c.track_id">
+                          <div class="text-xs text-dim">• <span x-text="candidateSummary(c)"></span></div>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+
+              <!-- DSL missions awaiting confirmation (dsl_mode = confirm) -->
+              <div x-show="dslMissions.length" class="card" style="border-color:var(--accent);margin-top:10px">
+                <div class="text-sm" style="font-weight:600;margin-bottom:6px">Mission DSL awaiting confirmation</div>
+                <template x-for="m in dslMissions" :key="m.id">
+                  <div style="border-top:1px solid var(--border);padding:8px 0">
+                    <div class="flex items-center justify-between">
+                      <div>
+                        <div class="text-xs text-dim">Mission <code x-text="m.id"></code> · intent <code x-text="m.intent_id || '—'"></code></div>
+                        <div class="text-sm">
+                          <span class="badge badge-dim" x-text="m.mission ? m.mission.kind : ''"></span>
+                          <span x-text="m.mission ? m.mission.intent_text : ''"></span>
+                          <span class="badge" :class="(m.mission && m.mission.confidence >= 0.5) ? 'badge-success' : 'badge-danger'" x-text="m.mission ? ('conf ' + pct(m.mission.confidence)) : ''"></span>
+                        </div>
+                      </div>
+                      <div class="flex gap-2">
+                        <button class="btn btn-primary btn-sm" @click="confirmMission(m.id)">Confirm &amp; Dispatch</button>
+                        <button class="btn btn-ghost btn-sm" @click="dismissMission(m.id)">Dismiss</button>
+                      </div>
+                    </div>
+                    <pre class="text-xs" style="white-space:pre-wrap;background:var(--bg);padding:8px;border-radius:4px;margin-top:8px;max-height:280px;overflow:auto" x-text="m.rendered"></pre>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <!-- 2. Fast-loop live situation -->
+            <div class="card" style="margin-bottom:16px">
+              <div class="card-header">2 · Fast Loop — Live Situation</div>
+              <div x-show="!snapshot" class="text-dim text-sm" style="padding:8px 0">No snapshot yet. Connect a platform adapter.</div>
+              <div x-show="snapshot">
+                <div class="text-xs text-dim" style="margin:8px 0 4px">Own platforms</div>
+                <table class="table">
+                  <thead><tr><th>ID</th><th>Type</th><th>Heading</th><th>Speed</th><th>Fuel</th><th>Damage</th><th>Weapons</th></tr></thead>
+                  <tbody>
+                    <template x-for="p in ownPlatforms" :key="p.id">
+                      <tr>
+                        <td x-text="p.id"></td>
+                        <td class="text-xs" x-text="p.platform_type"></td>
+                        <td x-text="num(p.pose && p.pose.heading_deg) + '°'"></td>
+                        <td x-text="num(p.velocity && p.velocity.speed_ms, 1) + ' m/s'"></td>
+                        <td x-text="p.fuel && p.fuel.max_kg > 0 ? pct(p.fuel.remaining_kg / p.fuel.max_kg) : '—'"></td>
+                        <td><span class="badge" :class="(p.damage || 0) > 0.5 ? 'badge-danger' : 'badge-dim'" x-text="pct(p.damage || 0)"></span></td>
+                        <td class="text-xs">
+                          <template x-for="w in (p.onboard_weapons || [])" :key="w.weapon_id">
+                            <span class="badge" :class="w.is_ready ? 'badge-success' : 'badge-dim'" style="margin-right:4px" x-text="w.weapon_id + ' ×' + num(w.quantity_remaining)"></span>
+                          </template>
+                          <span x-show="!(p.onboard_weapons || []).length" class="text-dim">—</span>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+                <div class="text-xs text-dim" style="margin:12px 0 4px">Tracks</div>
+                <table class="table">
+                  <thead><tr><th>Track</th><th>Class</th><th>IFF</th><th>Range</th><th>Bearing</th></tr></thead>
+                  <tbody>
+                    <template x-for="t in hostileTracks" :key="t.track_id">
+                      <tr>
+                        <td x-text="t.track_id"></td>
+                        <td class="text-xs" x-text="t.classification"></td>
+                        <td><span class="badge" :class="(t.iff === 'foe') ? 'badge-danger' : 'badge-dim'" x-text="t.iff"></span></td>
+                        <td x-text="t.range_m != null ? num(t.range_m) + ' m' : '—'"></td>
+                        <td x-text="t.bearing_deg != null ? num(t.bearing_deg) + '°' : '—'"></td>
+                      </tr>
+                    </template>
+                    <tr x-show="!hostileTracks.length"><td colspan="5" class="text-dim">No tracks</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- 3. Slow-loop cognition -->
+            <div class="card" style="margin-bottom:16px">
+              <div class="card-header">3 · Slow Loop — Situation Assessment</div>
+              <div x-show="!report" class="text-dim text-sm" style="padding:8px 0">No cognitive report yet.</div>
+              <div x-show="report">
+                <div class="text-sm" style="margin:8px 0" x-text="report && report.assessment && report.assessment.summary"></div>
+                <div class="text-xs text-dim" style="margin:8px 0 4px">Threats</div>
+                <table class="table">
+                  <thead><tr><th>Track</th><th>Type</th><th>Distance</th><th>Closing</th><th>Score</th></tr></thead>
+                  <tbody>
+                    <template x-for="th in assessmentThreats" :key="th.track_id">
+                      <tr>
+                        <td x-text="th.track_id"></td>
+                        <td class="text-xs" x-text="th.platform_type"></td>
+                        <td x-text="num(th.distance_m) + ' m'"></td>
+                        <td x-text="num(th.closing_rate_ms, 1) + ' m/s'"></td>
+                        <td><span class="badge" :class="th.threat_score > 0.6 ? 'badge-danger' : 'badge-dim'" x-text="num(th.threat_score, 2)"></span></td>
+                      </tr>
+                    </template>
+                    <tr x-show="report && report.assessment && !assessmentThreats.length"><td colspan="5" class="text-dim">No threats</td></tr>
+                  </tbody>
+                </table>
+                <div class="text-xs text-dim" style="margin:12px 0 4px">Engagement candidates (weapon × threat; planning narrows these before fire)</div>
+                <table class="table">
+                  <thead><tr><th>Platform</th><th>Weapon</th><th>Track</th><th>P(hit)</th><th></th></tr></thead>
+                  <tbody>
+                    <template x-for="op in assessmentOpportunities" :key="op.platform_id + ':' + op.weapon_id + ':' + op.track_id">
+                      <tr>
+                        <td x-text="op.platform_id"></td>
+                        <td class="text-xs" x-text="op.weapon_id"></td>
+                        <td x-text="op.track_id"></td>
+                        <td x-text="pct(op.estimated_p_hit)"></td>
+                        <td><button class="btn btn-ghost btn-sm" @click="authorizeTarget(op.platform_id, op.track_id)">Authorize</button></td>
+                      </tr>
+                    </template>
+                    <tr x-show="report && report.assessment && !assessmentOpportunities.length"><td colspan="5" class="text-dim">No opportunities</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- 4. Planning chain -->
+            <div class="card" style="margin-bottom:16px">
+              <div class="card-header">4 · Planning Chain — Mission → Tasks → Tactics</div>
+              <div x-show="!report" class="text-dim text-sm" style="padding:8px 0">No plan yet.</div>
+              <div x-show="report">
+                <div class="grid grid-cols-2" style="gap:12px;margin-top:8px">
+                  <div>
+                    <div class="text-xs text-dim">Mission</div>
+                    <div class="text-sm">ID: <span x-text="report && report.mission && report.mission.mission_id"></span></div>
+                    <div class="text-sm">Phase: <span class="badge badge-dim" x-text="(report && report.mission && report.mission.phase) || '—'"></span></div>
+                    <div class="text-sm" style="margin-top:4px">LLM 精排:
+                      <span x-show="report && !report.llm_refine_enabled" class="badge badge-dim">关闭</span>
+                      <span x-show="report && report.llm_refine_enabled && report.llm_refined" class="badge" style="background:var(--success,#16a34a);color:#fff" x-text="'本轮已精排 ' + report.baseline_allocation_count + '→' + report.final_allocation_count"></span>
+                      <span x-show="report && report.llm_refine_enabled && !report.llm_refined" class="badge badge-dim" title="LLM 未参与：无打击机会 / 超时 / 解析失败，已回退规则基线">已启用·本轮用规则基线</span>
+                    </div>
+                    <div class="text-xs text-dim" style="margin-top:6px">Allocations</div>
+                    <template x-for="a in (report && report.mission ? report.mission.allocations : [])" :key="a.platform_id + a.weapon_id + a.track_id">
+                      <div class="text-xs">• <span x-text="a.platform_id"></span> / <span x-text="a.weapon_id"></span> → <span x-text="a.track_id"></span></div>
+                    </template>
+                    <div class="text-xs text-dim" x-show="report && report.mission && !report.mission.allocations.length">No allocations</div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-dim">Tasks</div>
+                    <template x-for="tk in (report ? report.tasks : [])" :key="tk.id">
+                      <div class="text-xs">• <span class="badge badge-dim" x-text="tk.kind"></span> <span x-text="tk.assignee"></span></div>
+                    </template>
+                    <div class="text-xs text-dim" x-show="report && !report.tasks.length">No tasks</div>
+                    <div class="text-xs text-dim" style="margin-top:6px">Tactics</div>
+                    <template x-for="tc in (report ? report.tactics : [])" :key="tc.task_id + tc.playbook">
+                      <div class="text-xs">• <span x-text="tc.playbook"></span> (<span x-text="(tc.steps || []).length"></span> steps)</div>
+                    </template>
+                    <div class="text-xs text-dim" x-show="report && !report.tactics.length">No tactics</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 5. Intervention console -->
+            <div class="card" style="margin-bottom:16px">
+              <div class="card-header">5 · Intervention Console</div>
+              <div x-show="pendingPlanId" class="card" style="border-color:var(--warning);margin-top:8px">
+                <div class="flex items-center justify-between" style="padding:6px 0">
+                  <div>
+                    <div class="text-sm" style="font-weight:600">Plan held for approval</div>
+                    <div class="text-xs text-dim">Fingerprint: <code x-text="pendingPlanId"></code></div>
+                  </div>
+                  <button class="btn btn-primary btn-sm" @click="approvePlan(pendingPlanId)">Approve Plan</button>
+                </div>
+              </div>
+              <div x-show="report && report.denial_reason" class="text-xs" style="color:var(--danger);margin-top:8px">Denied: <span x-text="report && report.denial_reason"></span></div>
+
+              <div class="text-xs text-dim" style="margin:12px 0 4px">Weapon engagement lifecycle</div>
+              <table class="table">
+                <thead><tr><th>ID</th><th>State</th><th>Signatures</th><th></th></tr></thead>
+                <tbody>
+                  <template x-for="e in engagements" :key="e.approval_id || e.id">
+                    <tr>
+                      <td class="text-xs" x-text="e.approval_id || e.id"></td>
+                      <td>
+                        <span class="badge badge-dim" x-text="e.state"></span>
+                        <div class="text-xs text-dim" x-text="e.command_summary || ''"></div>
+                      </td>
+                      <td class="text-xs"><span x-text="e.collected_signatures || 0"></span>/<span x-text="e.required_signatures || 1"></span></td>
+                      <td>
+                        <button class="btn btn-primary btn-sm" x-show="canSignEngagement(e)" @click="signEngagement(e.approval_id || e.id)">Sign &amp; Launch</button>
+                        <span class="text-xs text-dim" x-show="!canSignEngagement(e)" x-text="engagementTerminalLabel(e)"></span>
+                      </td>
+                    </tr>
+                  </template>
+                  <tr x-show="!engagements.length"><td colspan="4" class="text-dim">No weapon engagements tracked</td></tr>
+                </tbody>
+              </table>
+
+              <div class="grid grid-cols-2" style="gap:12px;margin-top:12px">
+                <div>
+                  <div class="text-xs text-dim" style="margin-bottom:4px">Authorized targets (target clearance only, not weapon launch)</div>
+                  <template x-for="ta in targetAuthorizations" :key="(ta.platform_id || '') + (ta.track_id || '')">
+                    <div class="text-xs">• <span x-text="ta.platform_id"></span> → <span x-text="ta.track_id"></span></div>
+                  </template>
+                  <div class="text-xs text-dim" x-show="!targetAuthorizations.length">None</div>
+                </div>
+                <div>
+                  <div class="text-xs text-dim" style="margin-bottom:4px">Approved plans</div>
+                  <template x-for="ma in missionApprovals" :key="ma.fingerprint">
+                    <div class="text-xs">• <code x-text="ma.fingerprint"></code> (<span x-text="(ma.signers || []).length"></span> sig)</div>
+                  </template>
+                  <div class="text-xs text-dim" x-show="!missionApprovals.length">None</div>
+                </div>
+              </div>
             </div>
           </div>
         </div>

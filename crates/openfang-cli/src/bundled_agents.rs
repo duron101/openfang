@@ -1,42 +1,99 @@
 //! Compile-time embedded agent templates.
 //!
-//! All 30 bundled agent templates are embedded into the binary via `include_str!`.
-//! This ensures `openfang agent new` works immediately after install — no filesystem
-//! discovery needed.
+//! 10 tactical agent profiles (vessel + UAV) embedded via `include_str!()`.
+//! Agent sources live under `tactical-assets/agents/`.
 
 /// Returns all bundled agent templates as `(name, toml_content)` pairs.
 pub fn bundled_agents() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("analyst", include_str!("../../../agents/analyst/agent.toml")),
-        ("architect", include_str!("../../../agents/architect/agent.toml")),
-        ("assistant", include_str!("../../../agents/assistant/agent.toml")),
-        ("coder", include_str!("../../../agents/coder/agent.toml")),
-        ("code-reviewer", include_str!("../../../agents/code-reviewer/agent.toml")),
-        ("customer-support", include_str!("../../../agents/customer-support/agent.toml")),
-        ("data-scientist", include_str!("../../../agents/data-scientist/agent.toml")),
-        ("debugger", include_str!("../../../agents/debugger/agent.toml")),
-        ("devops-lead", include_str!("../../../agents/devops-lead/agent.toml")),
-        ("doc-writer", include_str!("../../../agents/doc-writer/agent.toml")),
-        ("email-assistant", include_str!("../../../agents/email-assistant/agent.toml")),
-        ("health-tracker", include_str!("../../../agents/health-tracker/agent.toml")),
-        ("hello-world", include_str!("../../../agents/hello-world/agent.toml")),
-        ("home-automation", include_str!("../../../agents/home-automation/agent.toml")),
-        ("legal-assistant", include_str!("../../../agents/legal-assistant/agent.toml")),
-        ("meeting-assistant", include_str!("../../../agents/meeting-assistant/agent.toml")),
-        ("ops", include_str!("../../../agents/ops/agent.toml")),
-        ("orchestrator", include_str!("../../../agents/orchestrator/agent.toml")),
-        ("personal-finance", include_str!("../../../agents/personal-finance/agent.toml")),
-        ("planner", include_str!("../../../agents/planner/agent.toml")),
-        ("recruiter", include_str!("../../../agents/recruiter/agent.toml")),
-        ("researcher", include_str!("../../../agents/researcher/agent.toml")),
-        ("sales-assistant", include_str!("../../../agents/sales-assistant/agent.toml")),
-        ("security-auditor", include_str!("../../../agents/security-auditor/agent.toml")),
-        ("social-media", include_str!("../../../agents/social-media/agent.toml")),
-        ("test-engineer", include_str!("../../../agents/test-engineer/agent.toml")),
-        ("translator", include_str!("../../../agents/translator/agent.toml")),
-        ("travel-planner", include_str!("../../../agents/travel-planner/agent.toml")),
-        ("tutor", include_str!("../../../agents/tutor/agent.toml")),
-        ("writer", include_str!("../../../agents/writer/agent.toml")),
+        (
+            "tca",
+            include_str!("../../../tactical-assets/agents/tca/agent.toml"),
+        ),
+        (
+            "sma",
+            include_str!("../../../tactical-assets/agents/sma/agent.toml"),
+        ),
+        (
+            "na",
+            include_str!("../../../tactical-assets/agents/na/agent.toml"),
+        ),
+        (
+            "fca",
+            include_str!("../../../tactical-assets/agents/fca/agent.toml"),
+        ),
+        (
+            "ca",
+            include_str!("../../../tactical-assets/agents/ca/agent.toml"),
+        ),
+        (
+            "fma",
+            include_str!("../../../tactical-assets/agents/fma/agent.toml"),
+        ),
+        (
+            "hma",
+            include_str!("../../../tactical-assets/agents/hma/agent.toml"),
+        ),
+        (
+            "ora",
+            include_str!("../../../tactical-assets/agents/ora/agent.toml"),
+        ),
+        (
+            "uav-cca",
+            include_str!("../../../tactical-assets/agents/uav-cca/agent.toml"),
+        ),
+        (
+            "uav-lsuav",
+            include_str!("../../../tactical-assets/agents/uav-lsuav/agent.toml"),
+        ),
+    ]
+}
+
+/// Returns bundled `SYSTEM_PROMPT.md` content for agents that ship a file-backed,
+/// editable system prompt (tactical + UAV agents). These are installed alongside
+/// `agent.toml` so prompts are user-editable and hot-reloadable on disk.
+pub fn bundled_agent_prompts() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "tca",
+            include_str!("../../../tactical-assets/agents/tca/SYSTEM_PROMPT.md"),
+        ),
+        (
+            "sma",
+            include_str!("../../../tactical-assets/agents/sma/SYSTEM_PROMPT.md"),
+        ),
+        (
+            "na",
+            include_str!("../../../tactical-assets/agents/na/SYSTEM_PROMPT.md"),
+        ),
+        (
+            "fca",
+            include_str!("../../../tactical-assets/agents/fca/SYSTEM_PROMPT.md"),
+        ),
+        (
+            "ca",
+            include_str!("../../../tactical-assets/agents/ca/SYSTEM_PROMPT.md"),
+        ),
+        (
+            "fma",
+            include_str!("../../../tactical-assets/agents/fma/SYSTEM_PROMPT.md"),
+        ),
+        (
+            "hma",
+            include_str!("../../../tactical-assets/agents/hma/SYSTEM_PROMPT.md"),
+        ),
+        (
+            "ora",
+            include_str!("../../../tactical-assets/agents/ora/SYSTEM_PROMPT.md"),
+        ),
+        (
+            "uav-cca",
+            include_str!("../../../tactical-assets/agents/uav-cca/SYSTEM_PROMPT.md"),
+        ),
+        (
+            "uav-lsuav",
+            include_str!("../../../tactical-assets/agents/uav-lsuav/SYSTEM_PROMPT.md"),
+        ),
     ]
 }
 
@@ -51,6 +108,18 @@ pub fn install_bundled_agents(agents_dir: &std::path::Path) {
         }
         if std::fs::create_dir_all(&dest_dir).is_ok() {
             let _ = std::fs::write(&dest_file, content);
+        }
+    }
+
+    // Install file-backed system prompts (preserve user edits if already present).
+    for (name, prompt) in bundled_agent_prompts() {
+        let dest_dir = agents_dir.join(name);
+        let dest_file = dest_dir.join("SYSTEM_PROMPT.md");
+        if dest_file.exists() {
+            continue;
+        }
+        if std::fs::create_dir_all(&dest_dir).is_ok() {
+            let _ = std::fs::write(&dest_file, prompt);
         }
     }
 }

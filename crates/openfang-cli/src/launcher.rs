@@ -50,13 +50,6 @@ fn is_first_run() -> bool {
     !of_home.join("config.toml").exists()
 }
 
-fn has_openclaw() -> bool {
-    // Quick check: does ~/.openclaw exist?
-    dirs::home_dir()
-        .map(|h| h.join(".openclaw").exists())
-        .unwrap_or(false)
-}
-
 // ── Types ───────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -80,7 +73,7 @@ struct MenuItem {
 const MENU_FIRST_RUN: &[MenuItem] = &[
     MenuItem {
         label: "Get started",
-        hint: "Providers, API keys, models, migration",
+        hint: "Providers, API keys, models, routing",
         choice: LauncherChoice::GetStarted,
     },
     MenuItem {
@@ -153,13 +146,11 @@ struct LauncherState {
     detecting: bool,
     tick: usize,
     first_run: bool,
-    openclaw_detected: bool,
 }
 
 impl LauncherState {
     fn new() -> Self {
         let first_run = is_first_run();
-        let openclaw_detected = first_run && has_openclaw();
         let mut list = ListState::default();
         list.select(Some(0));
         Self {
@@ -169,7 +160,6 @@ impl LauncherState {
             detecting: true,
             tick: 0,
             first_run,
-            openclaw_detected,
         }
     }
 
@@ -324,14 +314,9 @@ fn draw(frame: &mut ratatui::Frame, state: &mut LauncherState) {
     } else {
         3
     };
-    let migration_hint_h: u16 = if state.first_run && state.openclaw_detected {
-        2
-    } else {
-        0
-    };
     let menu_h = menu.len() as u16;
 
-    let total_needed = 1 + header_h + 1 + status_h + 1 + menu_h + migration_hint_h + 1;
+    let total_needed = 1 + header_h + 1 + status_h + 1 + menu_h + 1;
 
     // Vertical centering: place content block in the upper-third area
     let top_pad = if area.height > total_needed + 2 {
@@ -341,15 +326,14 @@ fn draw(frame: &mut ratatui::Frame, state: &mut LauncherState) {
     };
 
     let chunks = Layout::vertical([
-        Constraint::Length(top_pad),          // top space
-        Constraint::Length(header_h),         // header / welcome
-        Constraint::Length(1),                // separator
-        Constraint::Length(status_h),         // status indicators
-        Constraint::Length(1),                // separator
-        Constraint::Length(menu_h),           // menu items
-        Constraint::Length(migration_hint_h), // openclaw migration hint (if any)
-        Constraint::Length(1),                // keybind hints
-        Constraint::Min(0),                   // remaining space
+        Constraint::Length(top_pad),  // top space
+        Constraint::Length(header_h), // header / welcome
+        Constraint::Length(1),        // separator
+        Constraint::Length(status_h), // status indicators
+        Constraint::Length(1),        // separator
+        Constraint::Length(menu_h),   // menu items
+        Constraint::Length(1),        // keybind hints
+        Constraint::Min(0),           // remaining space
     ])
     .split(content);
 
@@ -508,28 +492,12 @@ fn draw(frame: &mut ratatui::Frame, state: &mut LauncherState) {
 
     frame.render_stateful_widget(list, chunks[5], &mut state.list);
 
-    // ── OpenClaw migration hint ─────────────────────────────────────────────
-    if state.first_run && state.openclaw_detected {
-        let hint_lines = vec![
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("\u{2192} ", Style::default().fg(theme::BLUE)),
-                Span::styled("Coming from OpenClaw? ", Style::default().fg(theme::BLUE)),
-                Span::styled(
-                    "'Get started' includes automatic migration.",
-                    theme::hint_style(),
-                ),
-            ]),
-        ];
-        frame.render_widget(Paragraph::new(hint_lines), chunks[6]);
-    }
-
     // ── Keybind hints ───────────────────────────────────────────────────────
     let hints = Line::from(vec![Span::styled(
         "\u{2191}\u{2193} navigate  enter select  q quit",
         theme::hint_style(),
     )]);
-    frame.render_widget(Paragraph::new(hints), chunks[7]);
+    frame.render_widget(Paragraph::new(hints), chunks[6]);
 }
 
 fn render_separator(frame: &mut ratatui::Frame, area: Rect) {

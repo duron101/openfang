@@ -12,9 +12,10 @@
 
 use chrono::{DateTime, Utc};
 use openfang_types::agent::AgentId;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -198,25 +199,329 @@ pub struct StepResult {
 }
 
 /// The workflow engine — manages definitions and executes pipeline runs.
+#[derive(Clone)]
 pub struct WorkflowEngine {
     /// Registered workflow definitions.
     workflows: Arc<RwLock<HashMap<WorkflowId, Workflow>>>,
     /// Active and completed workflow runs.
     runs: Arc<RwLock<HashMap<WorkflowRunId, WorkflowRun>>>,
+    /// Optional SQLite connection for persistence (workflow_definitions + workflow_runs).
+    /// When `None`, the engine is in-memory only (used in tests and ephemeral runs).
+    conn: Option<Arc<Mutex<Connection>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TacticalWorkflowFile {
+    #[serde(default)]
+    workflow: Vec<TacticalWorkflowDef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TacticalWorkflowDef {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    step: Vec<TacticalWorkflowStep>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TacticalWorkflowStep {
+    agent: String,
+    action: String,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+fn tactical_step_mode(mode: &str) -> StepMode {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "fan_out" | "fanout" => StepMode::FanOut,
+        _ => StepMode::Sequential,
+    }
+}
+
+fn parse_tactical_workflow_toml(text: &str) -> Result<Vec<Workflow>, String> {
+    let parsed: TacticalWorkflowFile =
+        toml::from_str(text).map_err(|e| format!("parse tactical workflow toml: {e}"))?;
+    Ok(parsed
+        .workflow
+        .into_iter()
+        .map(|wf| {
+            let mode = wf.mode.unwrap_or_else(|| "sequential".into());
+            let steps = wf
+                .step
+                .into_iter()
+                .enumerate()
+                .map(|(idx, step)| WorkflowStep {
+                    name: step.action.clone(),
+                    agent: StepAgent::ByName { name: step.agent },
+                    prompt_template: format!(
+                        "Workflow `{}` step `{}`: execute tactical action `{}`.\n\nInput:\n{{{{input}}}}",
+                        wf.name,
+                        idx + 1,
+                        step.action
+                    ),
+                    mode: tactical_step_mode(&mode),
+                    timeout_secs: step.timeout_secs.unwrap_or(120),
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                })
+                .collect();
+            Workflow {
+                id: WorkflowId::new(),
+                name: wf.name,
+                description: wf.description.unwrap_or_default(),
+                steps,
+                created_at: Utc::now(),
+            }
+        })
+        .collect())
 }
 
 impl WorkflowEngine {
-    /// Create a new workflow engine.
+    /// Create a new in-memory workflow engine (no persistence).
     pub fn new() -> Self {
         Self {
             workflows: Arc::new(RwLock::new(HashMap::new())),
             runs: Arc::new(RwLock::new(HashMap::new())),
+            conn: None,
         }
+    }
+
+    /// Create a workflow engine backed by SQLite for definition + run persistence.
+    pub fn with_connection(conn: Arc<Mutex<Connection>>) -> Self {
+        Self {
+            workflows: Arc::new(RwLock::new(HashMap::new())),
+            runs: Arc::new(RwLock::new(HashMap::new())),
+            conn: Some(conn),
+        }
+    }
+
+    /// Persist a workflow definition to SQLite (no-op if no connection).
+    fn persist_definition(&self, w: &Workflow) -> Result<(), String> {
+        let Some(conn) = self.conn.as_ref() else {
+            return Ok(());
+        };
+        let steps_json =
+            serde_json::to_string(&w.steps).map_err(|e| format!("serialize steps: {e}"))?;
+        let guard = conn.lock().map_err(|e| format!("lock: {e}"))?;
+        guard
+            .execute(
+                "INSERT OR REPLACE INTO workflow_definitions (id, name, description, steps_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    w.id.to_string(),
+                    w.name,
+                    w.description,
+                    steps_json,
+                    w.created_at.to_rfc3339(),
+                ],
+            )
+            .map_err(|e| format!("insert workflow_definition: {e}"))?;
+        Ok(())
+    }
+
+    /// Persist a workflow run to SQLite (no-op if no connection).
+    fn persist_run(&self, run: &WorkflowRun) -> Result<(), String> {
+        let Some(conn) = self.conn.as_ref() else {
+            return Ok(());
+        };
+        let step_results_json = serde_json::to_string(&run.step_results)
+            .map_err(|e| format!("serialize step_results: {e}"))?;
+        let state = match run.state {
+            WorkflowRunState::Pending => "pending",
+            WorkflowRunState::Running => "running",
+            WorkflowRunState::Completed => "completed",
+            WorkflowRunState::Failed => "failed",
+        };
+        let guard = conn.lock().map_err(|e| format!("lock: {e}"))?;
+        guard
+            .execute(
+                "INSERT OR REPLACE INTO workflow_runs
+                    (id, workflow_id, workflow_name, input, state, step_results_json, output, error, started_at, completed_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                rusqlite::params![
+                    run.id.to_string(),
+                    run.workflow_id.to_string(),
+                    run.workflow_name,
+                    run.input,
+                    state,
+                    step_results_json,
+                    run.output,
+                    run.error,
+                    run.started_at.to_rfc3339(),
+                    run.completed_at.map(|t| t.to_rfc3339()),
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .map_err(|e| format!("insert workflow_run: {e}"))?;
+        Ok(())
+    }
+
+    /// Restore workflow definitions and pending/running runs from SQLite.
+    /// Call this on kernel boot to recover state from a previous session.
+    #[allow(clippy::await_holding_lock)]
+    pub async fn restore_from_db(&self) -> Result<usize, String> {
+        let conn = match self.conn.as_ref() {
+            Some(c) => c,
+            None => return Ok(0),
+        };
+        let guard = conn.lock().map_err(|e| format!("lock: {e}"))?;
+
+        // Definitions
+        let mut def_stmt = guard
+            .prepare(
+                "SELECT id, name, description, steps_json, created_at FROM workflow_definitions",
+            )
+            .map_err(|e| format!("prepare defs: {e}"))?;
+        let defs: Vec<(String, String, String, String, String)> = def_stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|e| format!("query defs: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(def_stmt);
+
+        let mut count = 0;
+        for (id_str, name, desc, steps_json, created_str) in defs {
+            let id = match uuid::Uuid::parse_str(&id_str) {
+                Ok(u) => WorkflowId(u),
+                Err(_) => continue,
+            };
+            let steps: Vec<WorkflowStep> = match serde_json::from_str(&steps_json) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(workflow_id = %id_str, "skip workflow def: bad steps_json: {e}");
+                    continue;
+                }
+            };
+            let created_at = DateTime::parse_from_rfc3339(&created_str)
+                .map(|t| t.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let wf = Workflow {
+                id,
+                name: name.clone(),
+                description: desc,
+                steps,
+                created_at,
+            };
+            self.workflows.write().await.insert(id, wf);
+            count += 1;
+        }
+
+        // Pending/Running runs (Completed/Failed are not restored — they live in the DB for audit only)
+        let mut run_stmt = guard
+            .prepare(
+                "SELECT id, workflow_id, workflow_name, input, state, step_results_json, output, error, started_at, completed_at
+                 FROM workflow_runs WHERE state IN ('pending','running')",
+            )
+            .map_err(|e| format!("prepare runs: {e}"))?;
+        type RunRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        );
+        let runs: Vec<RunRow> = run_stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                ))
+            })
+            .map_err(|e| format!("query runs: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(run_stmt);
+        drop(guard);
+
+        for (
+            id_str,
+            workflow_id_str,
+            workflow_name,
+            input,
+            state_str,
+            step_results_json,
+            output,
+            error,
+            started_str,
+            completed_str,
+        ) in runs
+        {
+            let run_id = match uuid::Uuid::parse_str(&id_str) {
+                Ok(u) => WorkflowRunId(u),
+                Err(_) => continue,
+            };
+            let workflow_id = match uuid::Uuid::parse_str(&workflow_id_str) {
+                Ok(u) => WorkflowId(u),
+                Err(_) => continue,
+            };
+            let step_results: Vec<StepResult> =
+                serde_json::from_str(&step_results_json).unwrap_or_default();
+            let started_at = DateTime::parse_from_rfc3339(&started_str)
+                .map(|t| t.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let completed_at = completed_str
+                .as_deref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.with_timezone(&Utc));
+            let state = match state_str.as_str() {
+                "running" => WorkflowRunState::Running,
+                "completed" => WorkflowRunState::Completed,
+                "failed" => WorkflowRunState::Failed,
+                _ => WorkflowRunState::Pending,
+            };
+            let run = WorkflowRun {
+                id: run_id,
+                workflow_id,
+                workflow_name,
+                input,
+                state,
+                step_results,
+                output,
+                error,
+                started_at,
+                completed_at,
+            };
+            self.runs.write().await.insert(run_id, run);
+            count += 1;
+        }
+        info!(
+            restored = count,
+            "WorkflowEngine state restored from SQLite"
+        );
+        Ok(count)
     }
 
     /// Register a new workflow definition.
     pub async fn register(&self, workflow: Workflow) -> WorkflowId {
         let id = workflow.id;
+        if let Err(e) = self.persist_definition(&workflow) {
+            warn!(workflow_id = %id, "workflow persist failed: {e}");
+        }
         self.workflows.write().await.insert(id, workflow);
         info!(workflow_id = %id, "Workflow registered");
         id
@@ -225,6 +530,45 @@ impl WorkflowEngine {
     /// List all registered workflows.
     pub async fn list_workflows(&self) -> Vec<Workflow> {
         self.workflows.read().await.values().cloned().collect()
+    }
+
+    /// Register tactical workflows from `tactical-assets/workflows/tactical_workflows.toml`.
+    pub async fn register_tactical_toml(&self, text: &str) -> Result<Vec<WorkflowId>, String> {
+        let workflows = parse_tactical_workflow_toml(text)?;
+        let mut ids = Vec::new();
+        for workflow in workflows {
+            let id = self.register(workflow).await;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    /// Synchronous variant used during kernel boot.
+    pub fn register_tactical_toml_sync(&self, text: &str) -> Result<Vec<WorkflowId>, String> {
+        let workflows = parse_tactical_workflow_toml(text)?;
+        let mut ids = Vec::new();
+        for workflow in workflows {
+            let id = workflow.id;
+            if let Err(e) = self.persist_definition(&workflow) {
+                warn!(workflow_id = %id, "workflow persist failed: {e}");
+            }
+            self.workflows
+                .try_write()
+                .map_err(|_| "workflow registry lock busy during boot".to_string())?
+                .insert(id, workflow);
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    /// Find a registered workflow by name.
+    pub async fn find_workflow_by_name(&self, name: &str) -> Option<Workflow> {
+        self.workflows
+            .read()
+            .await
+            .values()
+            .find(|workflow| workflow.name.eq_ignore_ascii_case(name))
+            .cloned()
     }
 
     /// Get a specific workflow by ID.
@@ -266,6 +610,9 @@ impl WorkflowEngine {
             completed_at: None,
         };
 
+        if let Err(e) = self.persist_run(&run) {
+            warn!(run_id = %run_id, "run persist failed: {e}");
+        }
         let mut runs = self.runs.write().await;
         runs.insert(run_id, run);
 
@@ -428,6 +775,9 @@ impl WorkflowEngine {
             let mut runs = self.runs.write().await;
             let run = runs.get_mut(&run_id).ok_or("Workflow run not found")?;
             run.state = WorkflowRunState::Running;
+            if let Err(e) = self.persist_run(run) {
+                warn!(run_id = %run_id, "persist run state change failed: {e}");
+            }
 
             let workflow = self
                 .workflows
@@ -507,6 +857,9 @@ impl WorkflowEngine {
                                 r.state = WorkflowRunState::Failed;
                                 r.error = Some(e.clone());
                                 r.completed_at = Some(Utc::now());
+                                if let Err(pe) = self.persist_run(r) {
+                                    warn!(run_id = %run_id, "persist failed state: {pe}");
+                                }
                             }
                             return Err(e);
                         }
@@ -677,6 +1030,9 @@ impl WorkflowEngine {
                                 r.state = WorkflowRunState::Failed;
                                 r.error = Some(e.clone());
                                 r.completed_at = Some(Utc::now());
+                                if let Err(pe) = self.persist_run(r) {
+                                    warn!(run_id = %run_id, "persist failed state: {pe}");
+                                }
                             }
                             return Err(e);
                         }
@@ -750,6 +1106,9 @@ impl WorkflowEngine {
                                     r.state = WorkflowRunState::Failed;
                                     r.error = Some(e.clone());
                                     r.completed_at = Some(Utc::now());
+                                    if let Err(pe) = self.persist_run(r) {
+                                        warn!(run_id = %run_id, "persist failed state: {pe}");
+                                    }
                                 }
                                 return Err(e);
                             }
@@ -772,6 +1131,9 @@ impl WorkflowEngine {
             r.state = WorkflowRunState::Completed;
             r.output = Some(final_output.clone());
             r.completed_at = Some(Utc::now());
+            if let Err(e) = self.persist_run(r) {
+                warn!(run_id = %run_id, "persist completed state failed: {e}");
+            }
         }
 
         info!(run_id = %run_id, "Workflow completed successfully");
@@ -861,6 +1223,61 @@ mod tests {
 
         let list = engine.list_workflows().await;
         assert_eq!(list.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn registers_tactical_workflows_from_toml() {
+        let engine = WorkflowEngine::new();
+        let ids = engine
+            .register_tactical_toml(
+                r#"
+                [[workflow]]
+                name = "Patrol"
+                description = "Patrol cycle"
+                mode = "sequential"
+
+                [[workflow.step]]
+                agent = "na"
+                action = "navigate_to_next_waypoint"
+                timeout_secs = 3
+                "#,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(ids.len(), 1);
+        let workflow = engine.find_workflow_by_name("patrol").await.unwrap();
+        assert_eq!(workflow.name, "Patrol");
+        assert_eq!(workflow.steps.len(), 1);
+        assert_eq!(workflow.steps[0].name, "navigate_to_next_waypoint");
+    }
+
+    #[tokio::test]
+    async fn registers_commander_level_own_scope_templates() {
+        // The bundled tactical workflow library must carry the six commander-level
+        // own-scope mission templates with their full OODA step chains.
+        let engine = WorkflowEngine::new();
+        let text = include_str!("../../../tactical-assets/workflows/tactical_workflows.toml");
+        engine.register_tactical_toml(text).await.unwrap();
+
+        for (name, expected_steps) in [
+            ("PointDefense", 5usize),
+            ("TargetingHandoff", 5),
+            ("Picket", 4),
+            ("Escort", 4),
+            ("MaritimeInterdiction", 5),
+            ("Deception", 4),
+        ] {
+            let workflow = engine
+                .find_workflow_by_name(name)
+                .await
+                .unwrap_or_else(|| panic!("workflow `{name}` not registered"));
+            assert_eq!(
+                workflow.steps.len(),
+                expected_steps,
+                "`{name}` step count mismatch"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1363,5 +1780,46 @@ mod tests {
         let json = serde_json::to_string(&mode).unwrap();
         let parsed: StepMode = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, StepMode::Loop { max_iterations: 5, until } if until == "done"));
+    }
+
+    #[tokio::test]
+    async fn test_persist_and_restore_workflow() {
+        use openfang_memory::migration::run_migrations;
+        use std::sync::Mutex;
+
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        run_migrations(&conn.lock().unwrap()).unwrap();
+
+        // Register a workflow through a persistence-backed engine
+        let engine = WorkflowEngine::with_connection(Arc::clone(&conn));
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "persist-test".into(),
+            description: "round-trip".into(),
+            steps: vec![WorkflowStep {
+                name: "s1".into(),
+                agent: StepAgent::ByName { name: "a".into() },
+                prompt_template: "{{input}}".into(),
+                mode: StepMode::Sequential,
+                timeout_secs: 5,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+            }],
+            created_at: Utc::now(),
+        };
+        engine.register(wf.clone()).await;
+        let _run_id = engine.create_run(wf.id, "hello".into()).await.unwrap();
+
+        // Spin up a fresh engine and restore from the same DB
+        let engine2 = WorkflowEngine::with_connection(Arc::clone(&conn));
+        let restored = engine2.restore_from_db().await.unwrap();
+        assert!(restored >= 1, "expected ≥1 restored row, got {restored}");
+
+        let restored_wf = engine2.get_workflow(wf.id).await;
+        assert!(
+            restored_wf.is_some(),
+            "workflow definition should be restored"
+        );
+        assert_eq!(restored_wf.unwrap().name, "persist-test");
     }
 }

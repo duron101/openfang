@@ -1,0 +1,162 @@
+
+
+syntax="proto3";
+
+package ArkSIMCustomizedSituation;
+
+// --- OUTPUT FROM AFSIM ---
+// the message that is outputted from afsim
+message StateMessage
+{
+    repeated PlatformState platforms=1;
+	repeated ActiveWeaponState Weapons = 2;
+    double time=3;
+    double endTime=4;
+}
+//
+message AuxData
+{
+    string key=1;
+    uint32 type=3; //0=STRING,1=DOUBLE,2=BOOL,3=DICT
+
+    // only one of these should be set
+    string stringValue=2;
+    double doubleValue=4;
+    bool boolValue=5;
+    repeated AuxData dictValue=6;
+}
+// represents state of a single platform entity
+message PlatformState
+{
+    repeated double locationLLA=1;
+    repeated double locationWCS=2;
+
+    repeated double velocityNED=3;
+    repeated double velocityECS=4; //body velocity
+
+    repeated double orientationNED=5; //[heading,pitch,roll] ALL RADIANS
+
+    repeated double accelerationNED=6;
+    repeated double accelerationWCS=7;
+
+    string name=8;
+    string type=9;
+    string side=10;
+    uint32 index=11;
+
+    repeated TrackState tracks=12;
+
+    bool fuelAvailable = 13;
+    double fuel = 14;
+    double maxFuel = 16;
+    double fuelConsumptionRate = 22;
+
+    repeated AuxData auxdata=17;
+
+    double damageFactor = 18;
+
+    // repeated WeaponState weapons = 19;
+    map<string, WeaponState> weapons = 19;
+
+    repeated string assets=20;
+
+
+    uint32 uniqueId = 21;
+    double creationTime = 23;
+
+    bool hasCurrentTarget = 24;
+    string currentTarget = 25;
+
+    string spatialDomain = 26; // land, air, surface, subsurface, space, unknown
+    string category=27;
+	string commander=28;
+}
+
+message TrackState
+{
+    int32 localTrackNumber=1; // deprecated, use trackId
+    // int owningPlatformId=1;
+
+    double startTime = 2;
+    double timeSinceStarted = 3;
+    double updateTime = 4;
+    double updateCount = 5;
+    double timeSinceUpdated = 6;
+
+    bool typeValid = 7;
+    string type = 8;
+
+    bool sideValid = 9;
+    string side = 10;
+
+    bool locationValid = 11;
+    repeated double reportedLocationLLA = 12;
+    repeated double reportedLocationWCS = 13;
+    repeated double currentLocationLLA = 14;
+    repeated double currentLocationWCS = 15;
+
+    bool velocityValid = 16;
+    repeated double velocityWCS = 17;
+    repeated double velocityNED = 18; // this is relative to the reported location
+
+    bool headingValid = 19;
+    double heading = 20;
+
+    // "ambiguous", "foe", "friend", "neutral", "unknown"
+    string iff = 21;
+
+    bool rangeValid = 22;
+    double range = 23; // range of the track (meters).
+    double rangeErrorSigma = 24; // standard deviation of the error in the range measurement (meters).
+
+    bool bearingValid = 25;
+    double bearing = 26; // bearing of the target with respect to true north at the originators location, radians
+
+    bool elevationValid = 27;
+    double elevation = 28; // perceived target elevation angle from local horizontal (radians)
+    double elevationErrorSigma = 29;
+
+    string trackId = 30; // <name>:<number>
+
+    string targetName = 31; //truth name of platform this track is tracking
+
+    double trackQuality = 32;
+    bool stale = 33;
+
+    // state covariance matrix as of the last track update
+    bool stateCovarianceValid = 34;
+    repeated double stateCovarianceMatrix = 35; // row-major order
+
+}
+
+message WeaponState {
+    string name = 1;
+    string type = 2;
+    double quantityRemaining = 3;
+}
+message ActiveWeaponState //add by lhj 20240819
+{
+    repeated double locationLLA=1;
+    repeated double locationWCS=2;
+
+    repeated double velocityNED=3;
+    repeated double velocityECS=4; //body velocity
+
+    repeated double orientationNED=5; //[heading,pitch,roll] ALL RADIANS
+
+    repeated double accelerationNED=6;
+    repeated double accelerationWCS=7;
+	
+    string name=8;
+    string type=9;
+    string side=10;
+	string currentTarget = 11;
+	
+    string Domain = 12; // land, air, surface, subsurface, space, unknown
+	double playtime = 13;
+	string mode = 14;
+	string host_id = 15;
+	double damage = 16;
+	string effect = 17;
+}
+// --- END ---

@@ -1,0 +1,238 @@
+[15:38:58] Warlock 常规控制指令 — 手动逐步测试
+[15:38:58]   mode=tcp  wire=zmq  agent='self'  weapon='loiter_wave2'  track='self:1'
+[15:38:58]   共 1 条  Enter=发送 / s=跳过 / q=退出  log=E:\dev\openfang\protobuf\warlock_command_walkthrough.log
+[15:38:58]   提示: 未选 E_SetAgentOutsideControl，请先手动执行 --at 1 或确保已外部控制
+[15:38:58] ZMQ PAIR 已连接 127.0.0.1:18000 (裸 protobuf，首帧在首条指令后返回)
+[15:38:58] 
+============================================================
+[15:38:58] [1/1] E_FireAtTarget
+[15:38:58]   对目标开火 track='self:1' weapon='loiter_wave2'
+[15:39:00]   >> send E_FireAtTarget (34 bytes)
+[15:39:00]   << [E_FireAtTarget] #1 send=34B: t=6.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[15:39:00]   << t=6.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[15:39:01] 
+已发送 1/1 条。recv 累计=1
+[15:39:01] 请在 Warlock 中确认各指令效果。
+[15:47:14] Warlock TCP 实机 FireAtTarget 测试
+[15:47:14]   agent='self'  weapon='loiter_wave2'  track='self:1'
+[15:47:14] 等待 tcp://127.0.0.1:18000 就绪 (最长 120s)...
+[15:47:14]   → Warlock: 加载 usv_loiter_strike.txt 并 Play/Pause
+[15:47:15]   ... 尚未监听 (1)
+[15:47:28]   端口已就绪 (第 8 次探测)
+[15:47:28] ZMQ PAIR 已连接 127.0.0.1:18000 (裸 protobuf，首帧在首条指令后返回)
+[15:47:28]   >> E_SetAgentOutsideControl (8 bytes)
+[15:47:28]   << [step] #1 send=8B: t=0.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[15:47:29]   >> E_FireAtTarget (34 bytes)
+[15:47:30]   << [step] #2 send=34B: t=3.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[15:47:31]   >> 空步进 #1 SetDesiredVelocity (26 bytes)
+[15:47:33]   << [step] #3 send=26B: t=6.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[15:47:34]   >> 空步进 #2 SetDesiredVelocity (26 bytes)
+[15:47:36]   << [step] #4 send=26B: t=9.3s platforms=7 | self side=red hdg=40.7° vel=15.3m/s | self.index=6
+[15:47:37]   >> 空步进 #3 SetDesiredVelocity (26 bytes)
+[15:47:39]   << [step] #5 send=26B: t=12.3s platforms=7 | self side=red hdg=40.7° vel=14.1m/s | self.index=6
+[15:47:40] 
+PASS: TCP 闭环完成 recv=5 — 请在 Warlock 查看 loiter_wave2 效果
+[15:48:02] Warlock TCP 实机 FireAtTarget 测试
+[15:48:02]   agent='self'  weapon='loiter_wave2'  track='self:1'
+[15:48:02] 等待 tcp://127.0.0.1:18000 就绪 (最长 120s)...
+[15:48:02]   → Warlock: 加载 usv_loiter_strike.txt 并 Play/Pause
+[15:48:02]   端口已就绪 (第 1 次探测)
+[15:48:02] ZMQ PAIR 已连接 127.0.0.1:18000 (裸 protobuf，首帧在首条指令后返回)
+[15:48:02]   >> E_SetAgentOutsideControl (8 bytes)
+[15:48:33]   >> E_FireAtTarget (34 bytes)
+[15:49:04]   >> 空步进 #1 SetDesiredVelocity (26 bytes)
+[15:49:35]   >> 空步进 #2 SetDesiredVelocity (26 bytes)
+[15:50:06]   >> 空步进 #3 SetDesiredVelocity (26 bytes)
+[15:50:36] 用户中断
+[15:51:09] Warlock TCP 实机 FireAtTarget 测试
+[15:51:09]   agent='self'  weapon='loiter_wave2'  track='self:1'
+[15:51:09] 等待 tcp://127.0.0.1:18000 就绪 (最长 120s)...
+[15:51:09]   → Warlock: 加载 usv_loiter_strike.txt 并 Play/Pause
+[15:51:09]   端口已就绪 (第 1 次探测)
+[15:51:09] ZMQ PAIR 已连接 127.0.0.1:18000 (裸 protobuf，首帧在首条指令后返回)
+[15:51:09]   >> E_SetAgentOutsideControl (8 bytes)
+[15:51:09]   << [step] #1 send=8B: t=0.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[15:51:09]   >> E_FireAtTarget (34 bytes)
+[15:51:09]   << [step] #2 send=34B: t=3.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[15:51:10]   >> 空步进 #1 SetDesiredVelocity (26 bytes)
+[15:51:10]   << [step] #3 send=26B: t=6.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[15:51:11]   >> 空步进 #2 SetDesiredVelocity (26 bytes)
+[15:51:11]   << [step] #4 send=26B: t=9.3s platforms=7 | self side=red hdg=40.7° vel=15.3m/s | self.index=6
+[15:51:12]   >> 空步进 #3 SetDesiredVelocity (26 bytes)
+[15:51:12]   << [step] #5 send=26B: t=12.3s platforms=7 | self side=red hdg=40.7° vel=14.1m/s | self.index=6
+[15:51:13] 
+PASS: TCP 闭环完成 recv=5 — 请在 Warlock 查看 loiter_wave2 效果
+[15:55:23] Warlock ZMQ 18000 自动化 FireAtTarget 测试
+[15:55:23]   agent='self'  weapon='loiter_wave2'  track(缺省)='self:1'
+[15:55:23] 等待 tcp://127.0.0.1:18000 就绪 (最长 120s)...
+[15:55:23]   → Warlock: 加载 usv_loiter_strike.txt 并 Play (建议 Pause 后跑脚本)
+[15:55:24]   端口已就绪 (第 1 次探测)
+[15:55:24] ZMQ PAIR 已连接 127.0.0.1:18000 (裸 protobuf，首帧在首条指令后返回)
+[15:55:24]   >> E_SetAgentOutsideControl (8 bytes)
+[15:55:24]   << [E_SetAgentOutsideControl] #1 send=8B: t=0.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[15:55:24]   目标 track='self:1'  ← state(first track, 5 total)
+[15:55:24]   >> E_FireAtTarget (34 bytes) weapon='loiter_wave2' track='self:1'
+[15:55:24]   << [E_FireAtTarget] #2 send=34B: t=3.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[15:55:24]   >> post-fire #1 SetDesiredVelocity (26 bytes)
+[15:55:24]   << [post_fire_1] #3 send=26B: t=6.3s platforms=8 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[15:55:24]   >> post-fire #2 SetDesiredVelocity (26 bytes)
+[15:55:24]   << [post_fire_2] #4 send=26B: t=9.3s platforms=8 | self side=red hdg=40.7° vel=15.3m/s | self.index=6
+[15:55:25]   >> post-fire #3 SetDesiredVelocity (26 bytes)
+[15:55:25]   << [post_fire_3] #5 send=26B: t=12.3s platforms=8 | self side=red hdg=40.7° vel=14.2m/s | self.index=6
+[15:55:25] 
+PASS: 闭环 recv=5 — 请在 Warlock 查看 loiter_wave2 / track='self:1'
+[11:49:22] Warlock ZMQ 18000 自动化武器指令测试
+[11:49:22]   mode='salvo'  agent='self'  weapon='loiter_wave2' track(缺省)='self:1'  salvo_size=2
+[11:49:22] 等待 tcp://127.0.0.1:18000 就绪 (最长 120s)...
+[11:49:22]   → Warlock: 加载 usv_loiter_strike.txt 并 Play (建议 Pause 后跑脚本)
+[11:49:23]   ... 尚未监听 (1)
+[11:49:42]   ... 尚未监听 (10)
+[11:50:02]   ... 尚未监听 (20)
+[11:50:22]   ... 尚未监听 (30)
+[11:50:42]   ... 尚未监听 (40)
+[11:51:02]   ... 尚未监听 (50)
+[11:51:22]   ... 尚未监听 (60)
+[11:51:23] FAIL: 18000 未监听 — Warlock 需加载 usv_loiter_strike 并运行仿真
+[11:51:23]   备选: python test_fire_at_target.py  (ArkService 60004)
+[11:54:11] Warlock ZMQ 18000 自动化武器指令测试
+[11:54:11]   mode='salvo'  agent='self'  weapon='loiter_wave2' track(缺省)='self:1'  salvo_size=2
+[11:54:11] 等待 tcp://127.0.0.1:18000 就绪 (最长 120s)...
+[11:54:11]   → Warlock: 加载 usv_loiter_strike.txt 并 Play (建议 Pause 后跑脚本)
+[11:54:11]   端口已就绪 (第 1 次探测)
+[11:54:11] ZMQ PAIR 已连接 127.0.0.1:18000 (裸 protobuf，首帧在首条指令后返回)
+[11:54:11]   >> E_SetAgentOutsideControl (8 bytes)
+[11:54:11]   << [E_SetAgentOutsideControl] #1 send=8B: t=0.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[11:54:11]   目标 track='self:1'  ← state(first track, 5 total)
+[11:54:11]   >> E_FireSlavoAtTarget (34 bytes) weapon='loiter_wave2' track='self:1' salvo_size=2
+[11:54:11]   << [E_FireSlavoAtTarget] #2 send=34B: t=3.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[11:54:11]   >> post-fire #1 SetDesiredVelocity (26 bytes)
+[11:54:11]   << [post_fire_1] #3 send=26B: t=6.3s platforms=9 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[11:54:11]   >> post-fire #2 SetDesiredVelocity (26 bytes)
+[11:54:11]   << [post_fire_2] #4 send=26B: t=9.3s platforms=9 | self side=red hdg=40.7° vel=15.3m/s | self.index=6
+[11:54:12] 
+PASS: salvo 闭环 recv=4 — 请在 Warlock 查看 loiter_wave2 / track='self:1'
+[12:07:56] Warlock ZMQ 18000 自动化武器 + 机动观察测试
+[12:07:56]   mode='fire'  agent='self'  weapon='loiter_wave2' track(缺省)='self:1'  salvo_size=2
+[12:07:56]   pre_motion=True  post_motion=True  observe_steps=12  (预估仿真推进 ~154s+)
+[12:07:56] 等待 tcp://127.0.0.1:18000 就绪 (最长 120s)...
+[12:07:56]   → Warlock: 加载 usv_loiter_strike.txt 并 Play (建议 Pause 后跑脚本)
+[12:07:56]   端口已就绪 (第 1 次探测)
+[12:07:56] ZMQ PAIR 已连接 127.0.0.1:18000 (裸 protobuf，首帧在首条指令后返回)
+[12:07:56]   >> E_SetAgentOutsideControl (8 bytes)
+[12:07:56]   << [E_SetAgentOutsideControl] #1 send=8B: t=0.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[12:07:56] 
+--- pre_fire: 机动指令 (速度 12.0 m/s → 航向 90.0°) ---
+[12:07:56]   >> E_SetDesiredVelocity (26B) speed=12.0 m/s
+[12:07:56]   << [pre_fire_SetDesiredVelocity] #2 send=26B: t=3.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[12:07:56]   << velocity cmd: t=3.3s platforms=7 | self side=red hdg=40.7° vel=16.4m/s | self.index=6
+[12:07:56]   ... 空步进 x12 (~36s 仿真) 观察加速
+[12:07:56]   << [pre_fire_after_vel_observe_1/12] #3 send=0B: t=6.3s platforms=7 | self side=red hdg=40.7° vel=15.3m/s | self.index=6
+[12:07:58]   << [pre_fire_after_vel_observe_2/12] #4 send=0B: t=9.3s platforms=7 | self side=red hdg=40.7° vel=14.1m/s | self.index=6
+[12:07:59]   << [pre_fire_after_vel_observe_3/12] #5 send=0B: t=12.3s platforms=7 | self side=red hdg=40.7° vel=13.0m/s | self.index=6
+[12:08:07]   << [pre_fire_after_vel_observe_4/12] #6 send=0B: t=15.3s platforms=7 | self side=red hdg=40.7° vel=11.8m/s | self.index=6
+[12:08:10]   << [pre_fire_after_vel_observe_5/12] #7 send=0B: t=18.3s platforms=7 | self side=red hdg=40.7° vel=10.7m/s | self.index=6
+[12:08:13]   << [pre_fire_after_vel_observe_6/12] #8 send=0B: t=21.3s platforms=7 | self side=red hdg=40.7° vel=9.6m/s | self.index=6
+[12:08:16]   << [pre_fire_after_vel_observe_7/12] #9 send=0B: t=24.3s platforms=7 | self side=red hdg=40.7° vel=9.1m/s | self.index=6
+[12:08:19]   << [pre_fire_after_vel_observe_8/12] #10 send=0B: t=27.3s platforms=7 | self side=red hdg=40.7° vel=9.1m/s | self.index=6
+[12:08:22]   << [pre_fire_after_vel_observe_9/12] #11 send=0B: t=30.3s platforms=7 | self side=red hdg=40.7° vel=9.1m/s | self.index=6
+[12:08:25]   << [pre_fire_after_vel_observe_10/12] #12 send=0B: t=33.3s platforms=7 | self side=red hdg=40.7° vel=9.1m/s | self.index=6
+[12:08:28]   << [pre_fire_after_vel_observe_11/12] #13 send=0B: t=36.3s platforms=7 | self side=red hdg=40.7° vel=9.1m/s | self.index=6
+[12:08:31]   << [pre_fire_after_vel_observe_12/12] #14 send=0B: t=39.3s platforms=7 | self side=red hdg=40.7° vel=9.1m/s | self.index=6
+[12:08:33]   >> E_SetDesiredHeading (32B) heading=90.0° speed=10.0 m/s
+[12:08:34]   << [pre_fire_SetDesiredHeading] #15 send=32B: t=42.3s platforms=7 | self side=red hdg=40.7° vel=9.1m/s | self.index=6
+[12:08:34]   << heading cmd: t=42.3s platforms=7 | self side=red hdg=40.7° vel=9.1m/s | self.index=6
+[12:08:34]   ... 空步进 x12 (~36s 仿真) 观察转向
+[12:08:37]   << [pre_fire_after_hdg_observe_1/12] #16 send=0B: t=45.3s platforms=7 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:08:40]   << [pre_fire_after_hdg_observe_2/12] #17 send=0B: t=48.3s platforms=7 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:08:43]   << [pre_fire_after_hdg_observe_3/12] #18 send=0B: t=51.3s platforms=7 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:08:46]   << [pre_fire_after_hdg_observe_4/12] #19 send=0B: t=54.3s platforms=7 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:08:49]   << [pre_fire_after_hdg_observe_5/12] #20 send=0B: t=57.3s platforms=7 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:08:52]   << [pre_fire_after_hdg_observe_6/12] #21 send=0B: t=60.3s platforms=7 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:08:55]   << [pre_fire_after_hdg_observe_7/12] #22 send=0B: t=63.3s platforms=7 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:08:58]   << [pre_fire_after_hdg_observe_8/12] #23 send=0B: t=66.3s platforms=7 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:01]   << [pre_fire_after_hdg_observe_9/12] #24 send=0B: t=69.3s platforms=7 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:04]   << [pre_fire_after_hdg_observe_10/12] #25 send=0B: t=72.3s platforms=7 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:07]   << [pre_fire_after_hdg_observe_11/12] #26 send=0B: t=75.3s platforms=7 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:10]   << [pre_fire_after_hdg_observe_12/12] #27 send=0B: t=78.3s platforms=7 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:12]   目标 track='self:1'  ← state(first track, 5 total)
+[12:09:12] 
+--- 开火 ---
+[12:09:12]   >> E_FireAtTarget (34 bytes) weapon='loiter_wave2' track='self:1'
+[12:09:13]   << [E_FireAtTarget] #28 send=34B: t=81.3s platforms=7 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:13]   << fire: t=81.3s platforms=7 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:13]   ... 开火后空步进 x6 观察武器释放
+[12:09:16]   << [after_fire_observe_1/6] #29 send=0B: t=84.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:19]   << [after_fire_observe_2/6] #30 send=0B: t=87.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:22]   << [after_fire_observe_3/6] #31 send=0B: t=90.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:25]   << [after_fire_observe_4/6] #32 send=0B: t=93.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:28]   << [after_fire_observe_5/6] #33 send=0B: t=96.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:31]   << [after_fire_observe_6/6] #34 send=0B: t=99.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:33] 
+--- post_fire: 机动指令 (速度 8.0 m/s → 航向 180.0°) ---
+[12:09:33]   >> E_SetDesiredVelocity (26B) speed=8.0 m/s
+[12:09:34]   << [post_fire_SetDesiredVelocity] #35 send=26B: t=102.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:34]   << velocity cmd: t=102.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:34]   ... 空步进 x12 (~36s 仿真) 观察加速
+[12:09:37]   << [post_fire_after_vel_observe_1/12] #36 send=0B: t=105.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:40]   << [post_fire_after_vel_observe_2/12] #37 send=0B: t=108.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:43]   << [post_fire_after_vel_observe_3/12] #38 send=0B: t=111.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:46]   << [post_fire_after_vel_observe_4/12] #39 send=0B: t=114.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:49]   << [post_fire_after_vel_observe_5/12] #40 send=0B: t=117.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:52]   << [post_fire_after_vel_observe_6/12] #41 send=0B: t=120.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:55]   << [post_fire_after_vel_observe_7/12] #42 send=0B: t=123.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:09:58]   << [post_fire_after_vel_observe_8/12] #43 send=0B: t=126.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:10:01]   << [post_fire_after_vel_observe_9/12] #44 send=0B: t=129.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:10:04]   << [post_fire_after_vel_observe_10/12] #45 send=0B: t=132.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:10:07]   << [post_fire_after_vel_observe_11/12] #46 send=0B: t=135.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:10:10]   << [post_fire_after_vel_observe_12/12] #47 send=0B: t=138.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:10:12]   >> E_SetDesiredHeading (32B) heading=180.0° speed=10.0 m/s
+[12:10:13]   << [post_fire_SetDesiredHeading] #48 send=32B: t=141.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:10:13]   << heading cmd: t=141.3s platforms=8 | self side=red hdg=90.0° vel=-0.0m/s | self.index=6
+[12:10:13]   ... 空步进 x12 (~36s 仿真) 观察转向
+[12:10:16]   << [post_fire_after_hdg_observe_1/12] #49 send=0B: t=144.3s platforms=8 | self side=red hdg=-180.0° vel=-8.0m/s | self.index=6
+[12:10:19]   << [post_fire_after_hdg_observe_2/12] #50 send=0B: t=147.3s platforms=8 | self side=red hdg=-180.0° vel=-8.0m/s | self.index=6
+[12:10:22]   << [post_fire_after_hdg_observe_3/12] #51 send=0B: t=150.3s platforms=8 | self side=red hdg=-180.0° vel=-8.0m/s | self.index=6
+[12:10:25]   << [post_fire_after_hdg_observe_4/12] #52 send=0B: t=153.3s platforms=8 | self side=red hdg=-180.0° vel=-8.0m/s | self.index=6
+[12:10:28]   << [post_fire_after_hdg_observe_5/12] #53 send=0B: t=156.3s platforms=8 | self side=red hdg=-180.0° vel=-8.0m/s | self.index=6
+[12:10:31]   << [post_fire_after_hdg_observe_6/12] #54 send=0B: t=159.3s platforms=8 | self side=red hdg=-180.0° vel=-8.0m/s | self.index=6
+[12:10:34]   << [post_fire_after_hdg_observe_7/12] #55 send=0B: t=162.3s platforms=8 | self side=red hdg=-180.0° vel=-8.0m/s | self.index=6
+[12:10:37]   << [post_fire_after_hdg_observe_8/12] #56 send=0B: t=165.3s platforms=8 | self side=red hdg=-180.0° vel=-8.0m/s | self.index=6
+[12:10:40]   << [post_fire_after_hdg_observe_9/12] #57 send=0B: t=168.3s platforms=8 | self side=red hdg=-180.0° vel=-8.0m/s | self.index=6
+[12:10:43]   << [post_fire_after_hdg_observe_10/12] #58 send=0B: t=171.3s platforms=8 | self side=red hdg=-180.0° vel=-8.0m/s | self.index=6
+[12:10:46]   << [post_fire_after_hdg_observe_11/12] #59 send=0B: t=174.3s platforms=8 | self side=red hdg=-180.0° vel=-8.0m/s | self.index=6
+[12:10:49]   << [post_fire_after_hdg_observe_12/12] #60 send=0B: t=177.3s platforms=8 | self side=red hdg=-180.0° vel=-8.0m/s | self.index=6
+[12:10:51] 
+PASS: fire recv=60  sim_time≈177.3s — 请确认 Warlock 中速度/航向/开火效果
+[12:20:05] 可用 profile:
+[12:20:05]   motion   (4): E_SetDesiredVelocity, E_SetDesiredAltitude, E_SetDesiredHeading, E_GoToLocation
+[12:20:05]   sensor   (4): E_TurnOnSensor, E_TurnOffSensor, E_ChangeSensorMode, E_GetSensorCurrentMode
+[12:20:05]   comm     (3): E_TurnOnComm, E_TurnOffComm, E_SendMsgToPlatform
+[12:20:05]   weapon   (3): E_FireAtTarget, E_FireSlavoAtTarget, E_UpdateTarget
+[12:20:05]   aux      (1): E_AuxActions
+[12:20:05]   defer    (2): E_ReleaseOutsideControl, E_ChangePlatformNumber_del
+[12:20:05]   safe     — motion + sensor + comm + weapon + defer
+[12:20:05]   all      — 全指令 (默认跳过 risky，--include-risky 启用)
+[12:20:05] 
+全指令 observe 步数:
+[12:20:05]   E_ReleaseOutsideControl      observe=2
+[12:20:05]   E_SetDesiredVelocity         observe=8
+[12:20:05]   E_SetDesiredAltitude         observe=6
+[12:20:05]   E_SetDesiredHeading          observe=8
+[12:20:05]   E_GoToLocation               observe=10
+[12:20:05]   E_FollowRoute                observe=8
+[12:20:05]   E_AuxActions                 observe=4
+[12:20:05]   E_TurnOnSensor               observe=4
+[12:20:05]   E_TurnOffSensor              observe=3
+[12:20:05]   E_ChangeSensorMode           observe=4
+[12:20:05]   E_GetSensorCurrentMode       observe=2
+[12:20:05]   E_FireAtTarget               observe=5
+[12:20:05]   E_FireSlavoAtTarget          observe=6
+[12:20:05]   E_UpdateTarget               observe=3
+[12:20:05]   E_StartJamming               observe=4
+[12:20:05]   E_StopJamming                observe=3
+[12:20:05]   E_ChangeJammingMode          observe=4
+[12:20:05]   E_TurnOnComm                 observe=3
+[12:20:05]   E_TurnOffComm                observe=3
+[12:20:05]   E_SendMsgToPlatform          observe=2
+[12:20:05]   E_SendMsgToCommandChain      observe=2
+[12:20:05]   E_ChangePlatformNumber_add   observe=6

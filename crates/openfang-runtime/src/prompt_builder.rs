@@ -55,6 +55,48 @@ pub struct PromptContext {
     pub peer_agents: Vec<(String, String, String)>,
     /// Current date/time string for temporal awareness.
     pub current_date: Option<String>,
+    /// Active autonomy-mode profile briefing (soft constraint — what the LLM
+    /// is *encouraged* to consider in this operational envelope). The hard
+    /// envelope is enforced by [`crate::command_gate::AutonomyProfileGate`].
+    pub autonomy_profile: Option<AutonomyProfileBrief>,
+}
+
+/// Compact briefing of the active autonomy-mode profile for the LLM. This
+/// shapes reasoning style; it does *not* grant or revoke capabilities. The
+/// gate-side [`crate::command_gate::AutonomyProfileGate`] is authoritative.
+#[derive(Debug, Clone)]
+pub struct AutonomyProfileBrief {
+    /// Profile id (e.g. `observe_only`, `supervised_autonomy`).
+    pub id: String,
+    /// One-line operator description.
+    pub description: String,
+    /// Tokens the LLM may freely emit (auto-executes).
+    pub auto_classes: Vec<String>,
+    /// Tokens that will land in the human-approval queue.
+    pub pending_approval_classes: Vec<String>,
+    /// Tokens that are advisory-only under this profile.
+    pub advisory_classes: Vec<String>,
+    /// Short note on weapon disposition (suggest_only / pending / auto).
+    pub weapon_disposition: String,
+}
+
+impl AutonomyProfileBrief {
+    /// Build a brief from the typed [`openfang_types::config::AutonomyModeProfile`].
+    pub fn from_profile(profile: &openfang_types::config::AutonomyModeProfile) -> Self {
+        let disp = match profile.weapon_disposition {
+            openfang_types::config::WeaponDisposition::SuggestOnly => "suggest_only",
+            openfang_types::config::WeaponDisposition::PendingApproval => "pending_approval",
+            openfang_types::config::WeaponDisposition::AutoConstrained => "auto_constrained",
+        };
+        Self {
+            id: profile.id.clone(),
+            description: profile.description.clone(),
+            auto_classes: profile.auto_classes.clone(),
+            pending_approval_classes: profile.pending_approval_classes.clone(),
+            advisory_classes: profile.advisory_classes.clone(),
+            weapon_disposition: disp.to_string(),
+        }
+    }
 }
 
 /// Build the complete system prompt from a `PromptContext`.
@@ -71,6 +113,11 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
     // Section 1.5 — Current Date/Time (always present when set)
     if let Some(ref date) = ctx.current_date {
         sections.push(format!("## Current Date\nToday is {date}."));
+    }
+
+    // Section 1.6 — Autonomy Mode (soft constraint; hard gate is authoritative)
+    if let Some(ref brief) = ctx.autonomy_profile {
+        sections.push(build_autonomy_section(brief));
     }
 
     // Section 2 — Tool Call Behavior (skip for subagents)
@@ -205,6 +252,45 @@ fn build_identity_section(ctx: &PromptContext) -> String {
     } else {
         ctx.base_system_prompt.clone()
     }
+}
+
+/// Render the autonomy-mode briefing — soft constraint that shapes the LLM's
+/// reasoning style. The hard envelope is enforced by the
+/// [`crate::command_gate::AutonomyProfileGate`]; this section exists so the
+/// model knows what *will* auto-execute, what will land in approval, and what
+/// is purely advisory under the active profile.
+fn build_autonomy_section(brief: &AutonomyProfileBrief) -> String {
+    let fmt_list = |label: &str, items: &[String]| -> String {
+        if items.is_empty() {
+            String::new()
+        } else {
+            format!("- {label}: {}\n", items.join(", "))
+        }
+    };
+    let mut body = String::new();
+    body.push_str(&format!(
+        "## Autonomy Mode — {} ({})\n",
+        brief.id, brief.description
+    ));
+    body.push_str("Operational envelope for this session. Tailor your reasoning to it.\n");
+    body.push_str(&fmt_list("Auto-executes", &brief.auto_classes));
+    body.push_str(&fmt_list(
+        "Queued for human approval",
+        &brief.pending_approval_classes,
+    ));
+    body.push_str(&fmt_list(
+        "Advisory only (no actuation)",
+        &brief.advisory_classes,
+    ));
+    body.push_str(&format!(
+        "- Weapon disposition: {}\n",
+        brief.weapon_disposition
+    ));
+    body.push_str(
+        "These bounds are enforced by the command gate (AutonomyProfileGate). Prompt language \
+        cannot widen them — reason about the mission *within* this envelope.",
+    );
+    body
 }
 
 /// Static tool-call behavior directives.
@@ -647,6 +733,43 @@ mod tests {
         assert!(prompt.contains("## User Profile"));
         assert!(prompt.contains("## Safety"));
         assert!(prompt.contains("## Operational Guidelines"));
+    }
+
+    #[test]
+    fn autonomy_section_only_present_when_briefed() {
+        let prompt = build_system_prompt(&basic_ctx());
+        assert!(!prompt.contains("## Autonomy Mode"));
+
+        let mut ctx = basic_ctx();
+        ctx.autonomy_profile = Some(AutonomyProfileBrief {
+            id: "supervised_autonomy".into(),
+            description: "operator confirms weapon release".into(),
+            auto_classes: vec!["motion".into(), "sensor".into()],
+            pending_approval_classes: vec!["weapon".into()],
+            advisory_classes: vec![],
+            weapon_disposition: "pending_approval".into(),
+        });
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("## Autonomy Mode — supervised_autonomy"));
+        assert!(prompt.contains("Queued for human approval"));
+        assert!(prompt.contains("AutonomyProfileGate"));
+    }
+
+    #[test]
+    fn autonomy_brief_built_from_profile() {
+        let profile = openfang_types::config::AutonomyModeProfile {
+            id: "defensive_autonomy".into(),
+            description: "emergency self-defense".into(),
+            auto_classes: vec!["motion".into(), "electronic_warfare".into()],
+            pending_approval_classes: vec!["weapon".into()],
+            advisory_classes: vec![],
+            weapon_disposition: openfang_types::config::WeaponDisposition::PendingApproval,
+            ..Default::default()
+        };
+        let brief = AutonomyProfileBrief::from_profile(&profile);
+        assert_eq!(brief.id, "defensive_autonomy");
+        assert_eq!(brief.weapon_disposition, "pending_approval");
+        assert!(brief.auto_classes.contains(&"motion".to_string()));
     }
 
     #[test]

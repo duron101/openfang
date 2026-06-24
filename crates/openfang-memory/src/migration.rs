@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 7;
+const SCHEMA_VERSION: u32 = 8;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -37,6 +37,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 7 {
         migrate_v7(conn)?;
+    }
+
+    if current_version < 8 {
+        migrate_v8(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -294,6 +298,60 @@ fn migrate_v7(conn: &Connection) -> Result<(), rusqlite::Error> {
 
         INSERT OR IGNORE INTO migrations (version, applied_at, description)
         VALUES (7, datetime('now'), 'Add paired_devices table for device pairing');
+        ",
+    )?;
+    Ok(())
+}
+
+/// Version 8: Add workflow persistence + pending-reports queue for tactical vessel.
+/// Per the plan: WorkflowEngine + ReportQueue must survive kernel restart, and
+/// comm-loss-buffered intelligence reports must deduplicate.
+fn migrate_v8(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS workflow_definitions (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            steps_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_defs_name ON workflow_definitions(name);
+
+        CREATE TABLE IF NOT EXISTS workflow_runs (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL REFERENCES workflow_definitions(id),
+            workflow_name TEXT NOT NULL,
+            input TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            step_results_json TEXT NOT NULL DEFAULT '[]',
+            output TEXT,
+            error TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_state ON workflow_runs(state);
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workflow_id);
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_started_at ON workflow_runs(started_at DESC);
+
+        CREATE TABLE IF NOT EXISTS pending_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            synced INTEGER NOT NULL DEFAULT 0,
+            synced_at TEXT,
+            dedup_hash TEXT NOT NULL,
+            UNIQUE(dedup_hash)
+        );
+        CREATE INDEX IF NOT EXISTS idx_pending_reports_synced ON pending_reports(synced);
+        CREATE INDEX IF NOT EXISTS idx_pending_reports_priority
+            ON pending_reports(priority DESC, created_at ASC);
+
+        INSERT OR IGNORE INTO migrations (version, applied_at, description)
+        VALUES (8, datetime('now'), 'Add workflow persistence and pending_reports queue');
         ",
     )?;
     Ok(())

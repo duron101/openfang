@@ -1,4 +1,4 @@
-//! OpenFang CLI — command-line interface for the OpenFang Agent OS.
+//! OpenFang CLI 鈥?command-line interface for the OpenFang Agent OS.
 //!
 //! When a daemon is running (`openfang start`), the CLI talks to it over HTTP.
 //! Otherwise, commands boot an in-process kernel (single-shot mode).
@@ -69,9 +69,7 @@ const AFTER_HELP: &str = "\
   openfang chat                 Quick chat with the default agent
   openfang agent new coder      Spawn a new agent from a template
   openfang models list          Browse available LLM models
-  openfang add github           Install the GitHub integration
   openfang doctor               Run diagnostic health checks
-  openfang channel setup        Interactive channel setup wizard
   openfang cron list            List scheduled jobs
   openfang uninstall            Completely remove OpenFang from your system
 
@@ -84,15 +82,15 @@ const AFTER_HELP: &str = "\
   Docs:       https://github.com/RightNow-AI/openfang
   Dashboard:  http://127.0.0.1:4200/ (when daemon is running)";
 
-/// OpenFang — the open-source Agent Operating System.
+/// OpenFang 鈥?the open-source Agent Operating System.
 #[derive(Parser)]
 #[command(
     name = "openfang",
     version,
     about = "\u{1F40D} OpenFang \u{2014} Open-source Agent Operating System",
-    long_about = "\u{1F40D} OpenFang \u{2014} Open-source Agent Operating System\n\n\
-                  Deploy, manage, and orchestrate AI agents from your terminal.\n\
-                  40 channels \u{00b7} 60 skills \u{00b7} 50+ models \u{00b7} infinite possibilities.",
+    long_about = "\u{1F40D} OpenFang \u{2014} Tactical Agent OS\n\n\
+                  Offline UAV/USV autonomy brain 鈥?deploy and orchestrate tactical agents from your terminal.\n\
+                  4 tactical skills \u{00b7} 10 agent profiles \u{00b7} platform adapters \u{00b7} OFP mesh.",
     after_help = AFTER_HELP,
 )]
 struct Cli {
@@ -125,17 +123,9 @@ enum Commands {
     /// Manage event triggers (list, create, delete) [*].
     #[command(subcommand)]
     Trigger(TriggerCommands),
-    /// Migrate from another agent framework to OpenFang.
-    Migrate(MigrateArgs),
     /// Manage skills (install, list, search, create, remove) [*].
     #[command(subcommand)]
     Skill(SkillCommands),
-    /// Manage channel integrations (setup, test, enable, disable) [*].
-    #[command(subcommand)]
-    Channel(ChannelCommands),
-    /// Manage hands (list, activate, deactivate, info) [*].
-    #[command(subcommand)]
-    Hand(HandCommands),
     /// Show or edit configuration (show, edit, get, set, keys) [*].
     #[command(subcommand)]
     Config(ConfigCommands),
@@ -169,33 +159,6 @@ enum Commands {
     },
     /// Start MCP (Model Context Protocol) server over stdio.
     Mcp,
-    /// Add an integration (one-click MCP server setup).
-    Add {
-        /// Integration name (e.g., "github", "slack", "notion").
-        name: String,
-        /// API key or token to store in the vault.
-        #[arg(long)]
-        key: Option<String>,
-    },
-    /// Remove an installed integration.
-    Remove {
-        /// Integration name.
-        name: String,
-    },
-    /// List or search integrations.
-    Integrations {
-        /// Search query (optional — lists all if omitted).
-        query: Option<String>,
-    },
-    /// Manage the credential vault (init, set, list, remove) [*].
-    #[command(subcommand)]
-    Vault(VaultCommands),
-    /// Scaffold a new skill or integration template.
-    New {
-        /// What to scaffold.
-        #[arg(value_enum)]
-        kind: ScaffoldKind,
-    },
     /// Launch the interactive terminal dashboard.
     Tui,
     /// Browse models, aliases, and providers [*].
@@ -259,7 +222,7 @@ enum Commands {
         #[arg(long)]
         quick: bool,
     },
-    /// Interactive setup wizard for credentials and channels.
+    /// Interactive setup wizard for credentials.
     Configure,
     /// Send a one-shot message to an agent.
     Message {
@@ -292,50 +255,6 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
-enum VaultCommands {
-    /// Initialize the credential vault.
-    Init,
-    /// Store a credential in the vault.
-    Set {
-        /// Credential key (env var name).
-        key: String,
-    },
-    /// List all keys in the vault (values are hidden).
-    List,
-    /// Remove a credential from the vault.
-    Remove {
-        /// Credential key.
-        key: String,
-    },
-}
-
-#[derive(Clone, clap::ValueEnum)]
-enum ScaffoldKind {
-    Skill,
-    Integration,
-}
-
-#[derive(clap::Args)]
-struct MigrateArgs {
-    /// Source framework to migrate from.
-    #[arg(long, value_enum)]
-    from: MigrateSourceArg,
-    /// Path to the source workspace (auto-detected if not set).
-    #[arg(long)]
-    source_dir: Option<PathBuf>,
-    /// Dry run — show what would be imported without making changes.
-    #[arg(long)]
-    dry_run: bool,
-}
-
-#[derive(Clone, clap::ValueEnum)]
-enum MigrateSourceArg {
-    Openclaw,
-    Langchain,
-    Autogpt,
-}
-
-#[derive(Subcommand)]
 enum SkillCommands {
     /// Install a skill from FangHub or a local directory.
     Install {
@@ -356,80 +275,6 @@ enum SkillCommands {
     },
     /// Create a new skill scaffold.
     Create,
-}
-
-#[derive(Subcommand)]
-enum ChannelCommands {
-    /// List configured channels and their status.
-    List,
-    /// Interactive setup wizard for a channel.
-    Setup {
-        /// Channel name (telegram, discord, slack, whatsapp, etc.). Shows picker if omitted.
-        channel: Option<String>,
-    },
-    /// Test a channel by sending a test message.
-    Test {
-        /// Channel name.
-        channel: String,
-    },
-    /// Enable a channel.
-    Enable {
-        /// Channel name.
-        channel: String,
-    },
-    /// Disable a channel without removing its configuration.
-    Disable {
-        /// Channel name.
-        channel: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum HandCommands {
-    /// List all available hands.
-    List,
-    /// Show currently active hand instances.
-    Active,
-    /// Install a hand from a local directory containing HAND.toml.
-    Install {
-        /// Path to the hand directory (must contain HAND.toml).
-        path: String,
-    },
-    /// Activate a hand by ID.
-    Activate {
-        /// Hand ID (e.g. "clip", "lead", "researcher").
-        id: String,
-    },
-    /// Deactivate an active hand instance.
-    Deactivate {
-        /// Hand ID.
-        id: String,
-    },
-    /// Show detailed info about a hand.
-    Info {
-        /// Hand ID.
-        id: String,
-    },
-    /// Check dependency status for a hand.
-    CheckDeps {
-        /// Hand ID.
-        id: String,
-    },
-    /// Install missing dependencies for a hand.
-    InstallDeps {
-        /// Hand ID.
-        id: String,
-    },
-    /// Pause a running hand instance.
-    Pause {
-        /// Instance ID (from `hand active`).
-        id: String,
-    },
-    /// Resume a paused hand instance.
-    Resume {
-        /// Instance ID (from `hand active`).
-        id: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -905,32 +750,12 @@ fn main() {
             } => cmd_trigger_create(&agent_id, &pattern_json, &prompt, max_fires),
             TriggerCommands::Delete { trigger_id } => cmd_trigger_delete(&trigger_id),
         },
-        Some(Commands::Migrate(args)) => cmd_migrate(args),
         Some(Commands::Skill(sub)) => match sub {
             SkillCommands::Install { source } => cmd_skill_install(&source),
             SkillCommands::List => cmd_skill_list(),
             SkillCommands::Remove { name } => cmd_skill_remove(&name),
             SkillCommands::Search { query } => cmd_skill_search(&query),
             SkillCommands::Create => cmd_skill_create(),
-        },
-        Some(Commands::Channel(sub)) => match sub {
-            ChannelCommands::List => cmd_channel_list(),
-            ChannelCommands::Setup { channel } => cmd_channel_setup(channel.as_deref()),
-            ChannelCommands::Test { channel } => cmd_channel_test(&channel),
-            ChannelCommands::Enable { channel } => cmd_channel_toggle(&channel, true),
-            ChannelCommands::Disable { channel } => cmd_channel_toggle(&channel, false),
-        },
-        Some(Commands::Hand(sub)) => match sub {
-            HandCommands::List => cmd_hand_list(),
-            HandCommands::Active => cmd_hand_active(),
-            HandCommands::Install { path } => cmd_hand_install(&path),
-            HandCommands::Activate { id } => cmd_hand_activate(&id),
-            HandCommands::Deactivate { id } => cmd_hand_deactivate(&id),
-            HandCommands::Info { id } => cmd_hand_info(&id),
-            HandCommands::CheckDeps { id } => cmd_hand_check_deps(&id),
-            HandCommands::InstallDeps { id } => cmd_hand_install_deps(&id),
-            HandCommands::Pause { id } => cmd_hand_pause(&id),
-            HandCommands::Resume { id } => cmd_hand_resume(&id),
         },
         Some(Commands::Config(sub)) => match sub {
             ConfigCommands::Show => cmd_config_show(),
@@ -948,17 +773,7 @@ fn main() {
         Some(Commands::Dashboard) => cmd_dashboard(),
         Some(Commands::Completion { shell }) => cmd_completion(shell),
         Some(Commands::Mcp) => mcp::run_mcp_server(cli.config),
-        Some(Commands::Add { name, key }) => cmd_integration_add(&name, key.as_deref()),
-        Some(Commands::Remove { name }) => cmd_integration_remove(&name),
-        Some(Commands::Integrations { query }) => cmd_integrations_list(query.as_deref()),
-        Some(Commands::Vault(sub)) => match sub {
-            VaultCommands::Init => cmd_vault_init(),
-            VaultCommands::Set { key } => cmd_vault_set(&key),
-            VaultCommands::List => cmd_vault_list(),
-            VaultCommands::Remove { key } => cmd_vault_remove(&key),
-        },
-        Some(Commands::New { kind }) => cmd_scaffold(kind),
-        // ── New commands ────────────────────────────────────────────────
+        // 鈹€鈹€ New commands 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
         Some(Commands::Models(sub)) => match sub {
             ModelsCommands::List { provider, json } => cmd_models_list(provider.as_deref(), json),
             ModelsCommands::Aliases { json } => cmd_models_aliases(json),
@@ -1021,7 +836,10 @@ fn main() {
             SystemCommands::Version { json } => cmd_system_version(json),
         },
         Some(Commands::Reset { confirm }) => cmd_reset(confirm),
-        Some(Commands::Uninstall { confirm, keep_config }) => cmd_uninstall(confirm, keep_config),
+        Some(Commands::Uninstall {
+            confirm,
+            keep_config,
+        }) => cmd_uninstall(confirm, keep_config),
     }
 }
 
@@ -1479,7 +1297,7 @@ fn cmd_stop() {
                             return;
                         }
                     }
-                    // Still alive — force kill via PID
+                    // Still alive 鈥?force kill via PID
                     {
                         let of_dir = cli_openfang_home();
                         if let Some(info) = read_daemon_info(&of_dir) {
@@ -2157,7 +1975,9 @@ decay_rate = 0.05
                     if !json {
                         ui::check_ok(&format!("Port {api_listen} is available"));
                     }
-                    checks.push(serde_json::json!({"check": "port", "status": "ok", "address": api_listen}));
+                    checks.push(
+                        serde_json::json!({"check": "port", "status": "ok", "address": api_listen}),
+                    );
                 }
                 Err(_) => {
                     if !json {
@@ -2342,44 +2162,6 @@ decay_rate = 0.05
             ui::hint("Or run: openfang config set-key groq");
         }
         all_ok = false;
-    }
-
-    // --- Check 10: Channel token format validation ---
-    if !json {
-        println!("\n  Channel Integrations:");
-    }
-    let channel_keys = [
-        ("TELEGRAM_BOT_TOKEN", "Telegram"),
-        ("DISCORD_BOT_TOKEN", "Discord"),
-        ("SLACK_APP_TOKEN", "Slack App"),
-        ("SLACK_BOT_TOKEN", "Slack Bot"),
-    ];
-    for (env_var, name) in &channel_keys {
-        let set = std::env::var(env_var).is_ok();
-        if set {
-            // Format validation
-            let val = std::env::var(env_var).unwrap_or_default();
-            let format_ok = match *env_var {
-                "TELEGRAM_BOT_TOKEN" => val.contains(':'), // Telegram tokens have format "123456:ABC-DEF..."
-                "DISCORD_BOT_TOKEN" => val.len() > 50,     // Discord tokens are typically 59+ chars
-                "SLACK_APP_TOKEN" => val.starts_with("xapp-"),
-                "SLACK_BOT_TOKEN" => val.starts_with("xoxb-"),
-                _ => true,
-            };
-            if format_ok {
-                if !json {
-                    ui::provider_status(name, env_var, true);
-                }
-            } else if !json {
-                ui::check_warn(&format!("{name} ({env_var}) - unexpected token format"));
-            }
-            checks.push(serde_json::json!({"check": "channel", "name": name, "env_var": env_var, "status": if format_ok { "ok" } else { "warn" }}));
-        } else {
-            if !json {
-                ui::provider_status(name, env_var, false);
-            }
-            checks.push(serde_json::json!({"check": "channel", "name": name, "env_var": env_var, "status": "warn"}));
-        }
     }
 
     // --- Check 11: .env keys vs config api_key_env consistency ---
@@ -2582,29 +2364,7 @@ decay_rate = 0.05
         }
     }
 
-    // --- Check 14: Extension registry health ---
-    {
-        if !json {
-            println!("\n  Extensions:");
-        }
-        let openfang_dir = cli_openfang_home();
-        let mut ext_registry =
-            openfang_extensions::registry::IntegrationRegistry::new(&openfang_dir);
-        ext_registry.load_bundled();
-        let _ = ext_registry.load_installed();
-        let template_count = ext_registry.template_count();
-        let installed_count = ext_registry.installed_count();
-        if !json {
-            ui::check_ok(&format!(
-                "Available integration templates: {template_count}"
-            ));
-            ui::check_ok(&format!("Installed integrations: {installed_count}"));
-        }
-        checks.push(serde_json::json!({"check": "extensions_available", "status": "ok", "count": template_count}));
-        checks.push(serde_json::json!({"check": "extensions_installed", "status": "ok", "count": installed_count}));
-    }
-
-    // --- Check 15: Daemon health detail (if running) ---
+    // --- Check 14: Daemon health detail (if running) ---
     if let Some(ref base) = find_daemon() {
         if !json {
             println!("\n  Daemon Health:");
@@ -2692,34 +2452,6 @@ decay_rate = 0.05
                             ));
                         }
                         checks.push(serde_json::json!({"check": "daemon_mcp", "status": "ok", "configured": arr.len(), "connected": connected}));
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        // Check extensions health endpoint
-        match client.get(format!("{base}/api/integrations/health")).send() {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    if let Some(obj) = body.as_object() {
-                        let healthy = obj
-                            .values()
-                            .filter(|v| v.get("healthy").and_then(|h| h.as_bool()).unwrap_or(false))
-                            .count();
-                        let total = obj.len();
-                        if healthy == total {
-                            if !json {
-                                ui::check_ok(&format!(
-                                    "Integration health: {healthy}/{total} healthy"
-                                ));
-                            }
-                        } else if !json {
-                            ui::check_warn(&format!(
-                                "Integration health: {healthy}/{total} healthy"
-                            ));
-                        }
-                        checks.push(serde_json::json!({"check": "integration_health", "status": if healthy == total { "ok" } else { "warn" }, "healthy": healthy, "total": total}));
                     }
                 }
             }
@@ -2838,7 +2570,7 @@ fn cmd_dashboard() {
         url
     } else {
         // Auto-start the daemon
-        ui::hint("No daemon running — starting one now...");
+        ui::hint("No daemon running 鈥?starting one now...");
         match start_daemon_background() {
             Ok(url) => {
                 ui::success("Daemon started");
@@ -3153,7 +2885,7 @@ fn cmd_trigger_delete(trigger_id: &str) {
     }
 }
 
-/// Require a running daemon — exit with helpful message if not found.
+/// Require a running daemon 鈥?exit with helpful message if not found.
 fn require_daemon(command: &str) -> String {
     find_daemon().unwrap_or_else(|| {
         ui::error_with_fix(
@@ -3170,64 +2902,6 @@ fn boot_kernel(config: Option<PathBuf>) -> OpenFangKernel {
         Ok(k) => k,
         Err(e) => {
             boot_kernel_error(&e);
-            std::process::exit(1);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Migrate command
-// ---------------------------------------------------------------------------
-
-fn cmd_migrate(args: MigrateArgs) {
-    let source = match args.from {
-        MigrateSourceArg::Openclaw => openfang_migrate::MigrateSource::OpenClaw,
-        MigrateSourceArg::Langchain => openfang_migrate::MigrateSource::LangChain,
-        MigrateSourceArg::Autogpt => openfang_migrate::MigrateSource::AutoGpt,
-    };
-
-    let source_dir = args.source_dir.unwrap_or_else(|| {
-        let home = dirs::home_dir().unwrap_or_else(|| {
-            eprintln!("Error: Could not determine home directory");
-            std::process::exit(1);
-        });
-        match source {
-            openfang_migrate::MigrateSource::OpenClaw => home.join(".openclaw"),
-            openfang_migrate::MigrateSource::LangChain => home.join(".langchain"),
-            openfang_migrate::MigrateSource::AutoGpt => home.join("Auto-GPT"),
-        }
-    });
-
-    let target_dir = cli_openfang_home();
-
-    println!("Migrating from {} ({})...", source, source_dir.display());
-    if args.dry_run {
-        println!("  (dry run — no changes will be made)\n");
-    }
-
-    let options = openfang_migrate::MigrateOptions {
-        source,
-        source_dir,
-        target_dir,
-        dry_run: args.dry_run,
-    };
-
-    match openfang_migrate::run_migration(&options) {
-        Ok(report) => {
-            report.print_summary();
-
-            // Save migration report
-            if !args.dry_run {
-                let report_path = options.target_dir.join("migration_report.md");
-                if let Err(e) = std::fs::write(&report_path, report.to_markdown()) {
-                    eprintln!("Warning: Could not save migration report: {e}");
-                } else {
-                    println!("\n  Report saved to: {}", report_path.display());
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("Migration failed: {e}");
             std::process::exit(1);
         }
     }
@@ -3472,709 +3146,6 @@ if __name__ == "__main__":
 }
 
 // ---------------------------------------------------------------------------
-// Channel commands
-// ---------------------------------------------------------------------------
-
-fn cmd_channel_list() {
-    let home = openfang_home();
-    let config_path = home.join("config.toml");
-
-    if !config_path.exists() {
-        println!("No configuration found. Run `openfang init` first.");
-        return;
-    }
-
-    let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
-
-    println!("Channel Integrations:\n");
-    println!("{:<12} {:<10} STATUS", "CHANNEL", "ENV VAR");
-    println!("{}", "-".repeat(50));
-
-    let channels: Vec<(&str, &str)> = vec![
-        ("webchat", ""),
-        ("telegram", "TELEGRAM_BOT_TOKEN"),
-        ("discord", "DISCORD_BOT_TOKEN"),
-        ("slack", "SLACK_BOT_TOKEN"),
-        ("whatsapp", "WA_ACCESS_TOKEN"),
-        ("signal", ""),
-        ("matrix", "MATRIX_TOKEN"),
-        ("email", "EMAIL_PASSWORD"),
-    ];
-
-    for (name, env_var) in channels {
-        let configured = config_str.contains(&format!("[channels.{name}]"));
-        let env_set = if env_var.is_empty() {
-            true
-        } else {
-            std::env::var(env_var).is_ok()
-        };
-
-        let status = match (configured, env_set) {
-            (true, true) => "Ready",
-            (true, false) => "Missing env",
-            (false, _) => "Not configured",
-        };
-
-        println!(
-            "{:<12} {:<10} {}",
-            name,
-            if env_var.is_empty() { "—" } else { env_var },
-            status,
-        );
-    }
-
-    println!("\nUse `openfang channel setup <channel>` to configure a channel.");
-}
-
-fn cmd_channel_setup(channel: Option<&str>) {
-    let channel = match channel {
-        Some(c) => c.to_string(),
-        None => {
-            // Interactive channel picker
-            ui::section("Channel Setup");
-            ui::blank();
-            let channel_list = [
-                ("telegram", "Telegram bot (BotFather)"),
-                ("discord", "Discord bot"),
-                ("slack", "Slack app (Socket Mode)"),
-                ("whatsapp", "WhatsApp Cloud API"),
-                ("email", "Email (IMAP/SMTP)"),
-                ("signal", "Signal (signal-cli)"),
-                ("matrix", "Matrix homeserver"),
-            ];
-
-            for (i, (name, desc)) in channel_list.iter().enumerate() {
-                println!("    {:>2}. {:<12} {}", i + 1, name, desc.dimmed());
-            }
-            ui::blank();
-
-            let choice = prompt_input("  Choose channel [1]: ");
-            let idx = if choice.is_empty() {
-                0
-            } else {
-                choice
-                    .parse::<usize>()
-                    .unwrap_or(1)
-                    .saturating_sub(1)
-                    .min(channel_list.len() - 1)
-            };
-            channel_list[idx].0.to_string()
-        }
-    };
-
-    match channel.as_str() {
-        "telegram" => {
-            ui::section("Setting up Telegram");
-            ui::blank();
-            println!("  1. Open Telegram and message @BotFather");
-            println!("  2. Send /newbot and follow the prompts");
-            println!("  3. Copy the bot token");
-            ui::blank();
-
-            let token = prompt_input("  Paste your bot token: ");
-            if token.is_empty() {
-                ui::error("No token provided. Setup cancelled.");
-                return;
-            }
-
-            let config_block = "\n[channels.telegram]\nbot_token_env = \"TELEGRAM_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
-            maybe_write_channel_config("telegram", config_block);
-
-            // Save token to .env
-            match dotenv::save_env_key("TELEGRAM_BOT_TOKEN", &token) {
-                Ok(()) => ui::success("Token saved to ~/.openfang/.env"),
-                Err(_) => println!("    export TELEGRAM_BOT_TOKEN={token}"),
-            }
-
-            ui::blank();
-            ui::success("Telegram configured");
-            notify_daemon_restart();
-        }
-        "discord" => {
-            ui::section("Setting up Discord");
-            ui::blank();
-            println!("  1. Go to https://discord.com/developers/applications");
-            println!("  2. Create a New Application");
-            println!("  3. Go to Bot section and click 'Add Bot'");
-            println!("  4. Copy the bot token");
-            println!("  5. Under Privileged Gateway Intents, enable:");
-            println!("     - Message Content Intent");
-            println!("  6. Use OAuth2 URL Generator to invite bot to your server");
-            ui::blank();
-
-            let token = prompt_input("  Paste your bot token: ");
-            if token.is_empty() {
-                ui::error("No token provided. Setup cancelled.");
-                return;
-            }
-
-            let config_block = "\n[channels.discord]\nbot_token_env = \"DISCORD_BOT_TOKEN\"\ndefault_agent = \"coder\"\n";
-            maybe_write_channel_config("discord", config_block);
-
-            match dotenv::save_env_key("DISCORD_BOT_TOKEN", &token) {
-                Ok(()) => ui::success("Token saved to ~/.openfang/.env"),
-                Err(_) => println!("    export DISCORD_BOT_TOKEN={token}"),
-            }
-
-            ui::blank();
-            ui::success("Discord configured");
-            notify_daemon_restart();
-        }
-        "slack" => {
-            ui::section("Setting up Slack");
-            ui::blank();
-            println!("  1. Go to https://api.slack.com/apps");
-            println!("  2. Create New App -> From Scratch");
-            println!("  3. Enable Socket Mode (Settings -> Socket Mode)");
-            println!("  4. Copy the App-Level Token (xapp-...)");
-            println!("  5. Go to OAuth & Permissions, add scopes:");
-            println!("     - chat:write, app_mentions:read, im:history");
-            println!("  6. Install to workspace and copy Bot Token (xoxb-...)");
-            ui::blank();
-
-            let app_token = prompt_input("  Paste your App Token (xapp-...): ");
-            let bot_token = prompt_input("  Paste your Bot Token (xoxb-...): ");
-
-            let config_block = "\n[channels.slack]\napp_token_env = \"SLACK_APP_TOKEN\"\nbot_token_env = \"SLACK_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
-            maybe_write_channel_config("slack", config_block);
-
-            if !app_token.is_empty() {
-                match dotenv::save_env_key("SLACK_APP_TOKEN", &app_token) {
-                    Ok(()) => ui::success("App token saved to ~/.openfang/.env"),
-                    Err(_) => println!("    export SLACK_APP_TOKEN={app_token}"),
-                }
-            }
-            if !bot_token.is_empty() {
-                match dotenv::save_env_key("SLACK_BOT_TOKEN", &bot_token) {
-                    Ok(()) => ui::success("Bot token saved to ~/.openfang/.env"),
-                    Err(_) => println!("    export SLACK_BOT_TOKEN={bot_token}"),
-                }
-            }
-
-            ui::blank();
-            ui::success("Slack configured");
-            notify_daemon_restart();
-        }
-        "whatsapp" => {
-            ui::section("Setting up WhatsApp");
-            ui::blank();
-            println!("  WhatsApp Cloud API (recommended for production):");
-            println!("  1. Go to https://developers.facebook.com");
-            println!("  2. Create a Business App");
-            println!("  3. Add WhatsApp product");
-            println!("  4. Set up a test phone number");
-            println!("  5. Copy Phone Number ID and Access Token");
-            ui::blank();
-
-            let phone_id = prompt_input("  Phone Number ID: ");
-            let access_token = prompt_input("  Access Token: ");
-            let verify_token = prompt_input("  Verify Token: ");
-
-            let config_block = "\n[channels.whatsapp]\nmode = \"cloud_api\"\nphone_number_id_env = \"WA_PHONE_ID\"\naccess_token_env = \"WA_ACCESS_TOKEN\"\nverify_token_env = \"WA_VERIFY_TOKEN\"\nwebhook_port = 8443\ndefault_agent = \"assistant\"\n";
-            maybe_write_channel_config("whatsapp", config_block);
-
-            for (key, val) in [
-                ("WA_PHONE_ID", &phone_id),
-                ("WA_ACCESS_TOKEN", &access_token),
-                ("WA_VERIFY_TOKEN", &verify_token),
-            ] {
-                if !val.is_empty() {
-                    match dotenv::save_env_key(key, val) {
-                        Ok(()) => ui::success(&format!("{key} saved to ~/.openfang/.env")),
-                        Err(_) => println!("    export {key}={val}"),
-                    }
-                }
-            }
-
-            ui::blank();
-            ui::success("WhatsApp configured");
-            notify_daemon_restart();
-        }
-        "email" => {
-            ui::section("Setting up Email");
-            ui::blank();
-            println!("  For Gmail, use an App Password:");
-            println!("  https://myaccount.google.com/apppasswords");
-            ui::blank();
-
-            let username = prompt_input("  Email address: ");
-            if username.is_empty() {
-                ui::error("No email provided. Setup cancelled.");
-                return;
-            }
-
-            let password = prompt_input("  App password (or Enter to set later): ");
-
-            let config_block = format!(
-                "\n[channels.email]\nimap_host = \"imap.gmail.com\"\nimap_port = 993\nsmtp_host = \"smtp.gmail.com\"\nsmtp_port = 587\nusername = \"{username}\"\npassword_env = \"EMAIL_PASSWORD\"\npoll_interval = 30\ndefault_agent = \"assistant\"\n"
-            );
-            maybe_write_channel_config("email", &config_block);
-
-            if !password.is_empty() {
-                match dotenv::save_env_key("EMAIL_PASSWORD", &password) {
-                    Ok(()) => ui::success("Password saved to ~/.openfang/.env"),
-                    Err(_) => println!("    export EMAIL_PASSWORD=your_app_password"),
-                }
-            } else {
-                ui::hint("Set later: openfang config set-key email (or export EMAIL_PASSWORD=...)");
-            }
-
-            ui::blank();
-            ui::success("Email configured");
-            notify_daemon_restart();
-        }
-        "signal" => {
-            ui::section("Setting up Signal");
-            ui::blank();
-            println!("  Signal requires signal-cli (https://github.com/AsamK/signal-cli).");
-            ui::blank();
-            println!("  1. Install signal-cli:");
-            println!("     - macOS: brew install signal-cli");
-            println!("     - Linux: download from GitHub releases");
-            println!("     - Or use the Docker image");
-            println!("  2. Register or link a phone number:");
-            println!("     signal-cli -u +1YOURPHONE register");
-            println!("     signal-cli -u +1YOURPHONE verify CODE");
-            println!("  3. Start signal-cli in JSON-RPC mode:");
-            println!("     signal-cli -u +1YOURPHONE jsonRpc --socket /tmp/signal-cli.sock");
-            ui::blank();
-
-            let phone = prompt_input("  Your phone number (+1XXXX, or Enter to skip): ");
-
-            let config_block = "\n[channels.signal]\nphone_env = \"SIGNAL_PHONE\"\nsocket_path = \"/tmp/signal-cli.sock\"\ndefault_agent = \"assistant\"\n";
-            maybe_write_channel_config("signal", config_block);
-
-            if !phone.is_empty() {
-                match dotenv::save_env_key("SIGNAL_PHONE", &phone) {
-                    Ok(()) => ui::success("Phone saved to ~/.openfang/.env"),
-                    Err(_) => println!("    export SIGNAL_PHONE={phone}"),
-                }
-            }
-
-            ui::blank();
-            ui::success("Signal configured");
-            notify_daemon_restart();
-        }
-        "matrix" => {
-            ui::section("Setting up Matrix");
-            ui::blank();
-            println!("  1. Create a bot account on your Matrix homeserver");
-            println!("     (e.g., register @openfang-bot:matrix.org)");
-            println!("  2. Obtain an access token:");
-            println!("     curl -X POST https://matrix.org/_matrix/client/r0/login \\");
-            println!("       -d '{{\"type\":\"m.login.password\",\"user\":\"openfang-bot\",\"password\":\"...\"}}'");
-            println!("     Copy the access_token from the response.");
-            println!("  3. Invite the bot to rooms you want it to monitor.");
-            ui::blank();
-
-            let homeserver = prompt_input("  Homeserver URL [https://matrix.org]: ");
-            let homeserver = if homeserver.is_empty() {
-                "https://matrix.org".to_string()
-            } else {
-                homeserver
-            };
-            let token = prompt_input("  Access token: ");
-
-            let config_block = "\n[channels.matrix]\nhomeserver_env = \"MATRIX_HOMESERVER\"\naccess_token_env = \"MATRIX_ACCESS_TOKEN\"\ndefault_agent = \"assistant\"\n";
-            maybe_write_channel_config("matrix", config_block);
-
-            let _ = dotenv::save_env_key("MATRIX_HOMESERVER", &homeserver);
-            if !token.is_empty() {
-                match dotenv::save_env_key("MATRIX_ACCESS_TOKEN", &token) {
-                    Ok(()) => ui::success("Token saved to ~/.openfang/.env"),
-                    Err(_) => println!("    export MATRIX_ACCESS_TOKEN={token}"),
-                }
-            }
-
-            ui::blank();
-            ui::success("Matrix configured");
-            notify_daemon_restart();
-        }
-        other => {
-            ui::error_with_fix(
-                &format!("Unknown channel: {other}"),
-                "Available: telegram, discord, slack, whatsapp, email, signal, matrix",
-            );
-            std::process::exit(1);
-        }
-    }
-}
-
-/// Offer to append a channel config block to config.toml if it doesn't already exist.
-fn maybe_write_channel_config(channel: &str, config_block: &str) {
-    let home = openfang_home();
-    let config_path = home.join("config.toml");
-
-    if !config_path.exists() {
-        ui::hint("No config.toml found. Run `openfang init` first.");
-        return;
-    }
-
-    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let section_header = format!("[channels.{channel}]");
-    if existing.contains(&section_header) {
-        ui::check_ok(&format!("{section_header} already in config.toml"));
-        return;
-    }
-
-    let answer = prompt_input("  Write to config.toml? [Y/n] ");
-    if answer.is_empty() || answer.starts_with('y') || answer.starts_with('Y') {
-        let mut content = existing;
-        content.push_str(config_block);
-        if std::fs::write(&config_path, &content).is_ok() {
-            restrict_file_permissions(&config_path);
-            ui::check_ok(&format!("Added {section_header} to config.toml"));
-        } else {
-            ui::check_fail("Failed to write config.toml");
-        }
-    }
-}
-
-/// After channel config changes, warn user if daemon is running.
-fn notify_daemon_restart() {
-    if find_daemon().is_some() {
-        ui::check_warn("Restart the daemon to activate this channel");
-    } else {
-        ui::hint("Start the daemon: openfang start");
-    }
-}
-
-fn cmd_channel_test(channel: &str) {
-    if let Some(base) = find_daemon() {
-        let client = daemon_client();
-        let body = daemon_json(
-            client
-                .post(format!("{base}/api/channels/{channel}/test"))
-                .send(),
-        );
-        if body.get("status").is_some() {
-            println!("Test message sent to {channel}!");
-        } else {
-            eprintln!(
-                "Failed: {}",
-                body["error"].as_str().unwrap_or("Unknown error")
-            );
-        }
-    } else {
-        eprintln!("Channel test requires a running daemon. Start with: openfang start");
-        std::process::exit(1);
-    }
-}
-
-fn cmd_channel_toggle(channel: &str, enable: bool) {
-    let action = if enable { "enabled" } else { "disabled" };
-    if let Some(base) = find_daemon() {
-        let client = daemon_client();
-        let endpoint = if enable { "enable" } else { "disable" };
-        let body = daemon_json(
-            client
-                .post(format!("{base}/api/channels/{channel}/{endpoint}"))
-                .send(),
-        );
-        if body.get("status").is_some() {
-            println!("Channel {channel} {action}.");
-        } else {
-            eprintln!(
-                "Failed: {}",
-                body["error"].as_str().unwrap_or("Unknown error")
-            );
-        }
-    } else {
-        println!("Note: Channel {channel} will be {action} when the daemon starts.");
-        println!("Edit ~/.openfang/config.toml to persist this change.");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Hand commands
-// ---------------------------------------------------------------------------
-
-fn cmd_hand_install(path: &str) {
-    let base = require_daemon("hand install");
-    let dir = std::path::Path::new(path);
-    let toml_path = dir.join("HAND.toml");
-    let skill_path = dir.join("SKILL.md");
-
-    if !toml_path.exists() {
-        eprintln!(
-            "Error: No HAND.toml found in {}",
-            dir.canonicalize()
-                .unwrap_or_else(|_| dir.to_path_buf())
-                .display()
-        );
-        std::process::exit(1);
-    }
-
-    let toml_content = std::fs::read_to_string(&toml_path).unwrap_or_else(|e| {
-        eprintln!("Error reading {}: {e}", toml_path.display());
-        std::process::exit(1);
-    });
-    let skill_content = std::fs::read_to_string(&skill_path).unwrap_or_default();
-
-    let client = daemon_client();
-    let body = daemon_json(
-        client
-            .post(format!("{base}/api/hands/install"))
-            .json(&serde_json::json!({
-                "toml_content": toml_content,
-                "skill_content": skill_content,
-            }))
-            .send(),
-    );
-
-    if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
-        eprintln!("Error: {err}");
-        std::process::exit(1);
-    }
-
-    println!(
-        "Installed hand: {} ({})",
-        body["name"].as_str().unwrap_or("?"),
-        body["id"].as_str().unwrap_or("?"),
-    );
-    println!("Use `openfang hand activate {}` to start it.", body["id"].as_str().unwrap_or("?"));
-}
-
-fn cmd_hand_list() {
-    let base = require_daemon("hand list");
-    let client = daemon_client();
-    let body = daemon_json(client.get(format!("{base}/api/hands")).send());
-    // API returns {"hands": [...]} or a bare array
-    let arr_val;
-    if let Some(arr) = body.get("hands").and_then(|v| v.as_array()) {
-        arr_val = arr.clone();
-    } else if let Some(arr) = body.as_array() {
-        arr_val = arr.clone();
-    } else {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&body).unwrap_or_default()
-        );
-        return;
-    }
-    if let Some(arr) = Some(&arr_val) {
-        if arr.is_empty() {
-            println!("No hands available.");
-            return;
-        }
-        println!(
-            "{:<14} {:<20} {:<10} DESCRIPTION",
-            "ID", "NAME", "CATEGORY"
-        );
-        println!("{}", "-".repeat(72));
-        for h in arr {
-            println!(
-                "{:<14} {:<20} {:<10} {}",
-                h["id"].as_str().unwrap_or("?"),
-                h["name"].as_str().unwrap_or("?"),
-                h["category"].as_str().unwrap_or("?"),
-                h["description"].as_str().unwrap_or("").chars().take(40).collect::<String>(),
-            );
-        }
-        println!("\nUse `openfang hand activate <id>` to activate a hand.");
-    }
-}
-
-fn cmd_hand_active() {
-    let base = require_daemon("hand active");
-    let client = daemon_client();
-    let body = daemon_json(client.get(format!("{base}/api/hands/active")).send());
-    // API returns {"instances": [...]} or bare array
-    let arr = body
-        .get("instances")
-        .and_then(|v| v.as_array())
-        .or_else(|| body.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if arr.is_empty() {
-        println!("No active hands.");
-        return;
-    }
-    println!(
-        "{:<38} {:<14} {:<10} AGENT",
-        "INSTANCE", "HAND", "STATUS"
-    );
-    println!("{}", "-".repeat(72));
-    for i in &arr {
-        println!(
-            "{:<38} {:<14} {:<10} {}",
-            i["instance_id"].as_str().unwrap_or("?"),
-            i["hand_id"].as_str().unwrap_or("?"),
-            i["status"].as_str().unwrap_or("?"),
-            i["agent_name"].as_str().unwrap_or("?"),
-        );
-    }
-}
-
-fn cmd_hand_activate(id: &str) {
-    let base = require_daemon("hand activate");
-    let client = daemon_client();
-    let body = daemon_json(
-        client
-            .post(format!("{base}/api/hands/{id}/activate"))
-            .header("content-type", "application/json")
-            .body("{}")
-            .send(),
-    );
-    if body.get("instance_id").is_some() {
-        println!(
-            "Hand '{}' activated (instance: {}, agent: {})",
-            id,
-            body["instance_id"].as_str().unwrap_or("?"),
-            body["agent_name"].as_str().unwrap_or("?"),
-        );
-    } else {
-        eprintln!(
-            "Failed to activate hand '{}': {}",
-            id,
-            body["error"].as_str().unwrap_or("Unknown error")
-        );
-        std::process::exit(1);
-    }
-}
-
-fn cmd_hand_deactivate(id: &str) {
-    let base = require_daemon("hand deactivate");
-    let client = daemon_client();
-    // First find the instance ID for this hand
-    let active = daemon_json(client.get(format!("{base}/api/hands/active")).send());
-    let arr = active
-        .get("instances")
-        .and_then(|v| v.as_array())
-        .or_else(|| active.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let instance_id = arr.iter().find_map(|i| {
-        if i["hand_id"].as_str() == Some(id) {
-            i["instance_id"].as_str().map(|s| s.to_string())
-        } else {
-            None
-        }
-    });
-
-    match instance_id {
-        Some(iid) => {
-            let body = daemon_json(
-                client
-                    .delete(format!("{base}/api/hands/instances/{iid}"))
-                    .send(),
-            );
-            if body.get("status").is_some() {
-                println!("Hand '{id}' deactivated.");
-            } else {
-                eprintln!(
-                    "Failed: {}",
-                    body["error"].as_str().unwrap_or("Unknown error")
-                );
-                std::process::exit(1);
-            }
-        }
-        None => {
-            eprintln!("No active instance found for hand '{id}'.");
-            std::process::exit(1);
-        }
-    }
-}
-
-fn cmd_hand_info(id: &str) {
-    let base = require_daemon("hand info");
-    let client = daemon_client();
-    let body = daemon_json(client.get(format!("{base}/api/hands/{id}")).send());
-    if body.get("error").is_some() {
-        eprintln!(
-            "Hand not found: {}",
-            body["error"].as_str().unwrap_or(id)
-        );
-        std::process::exit(1);
-    }
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&body).unwrap_or_default()
-    );
-}
-
-fn cmd_hand_check_deps(id: &str) {
-    let base = require_daemon("hand check-deps");
-    let client = daemon_client();
-    let body = daemon_json(
-        client
-            .post(format!("{base}/api/hands/{id}/check-deps"))
-            .send(),
-    );
-    if body.get("error").is_some() {
-        ui::error(&format!(
-            "Failed: {}",
-            body["error"].as_str().unwrap_or("?")
-        ));
-    } else {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&body).unwrap_or_default()
-        );
-    }
-}
-
-fn cmd_hand_install_deps(id: &str) {
-    let base = require_daemon("hand install-deps");
-    let client = daemon_client();
-    let body = daemon_json(
-        client
-            .post(format!("{base}/api/hands/{id}/install-deps"))
-            .send(),
-    );
-    if body.get("error").is_some() {
-        ui::error(&format!(
-            "Failed: {}",
-            body["error"].as_str().unwrap_or("?")
-        ));
-    } else {
-        ui::success(&format!("Dependencies installed for hand '{id}'."));
-        if let Some(results) = body.get("results") {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(results).unwrap_or_default()
-            );
-        }
-    }
-}
-
-fn cmd_hand_pause(id: &str) {
-    let base = require_daemon("hand pause");
-    let client = daemon_client();
-    let body = daemon_json(
-        client
-            .post(format!("{base}/api/hands/instances/{id}/pause"))
-            .send(),
-    );
-    if body.get("error").is_some() {
-        ui::error(&format!(
-            "Failed: {}",
-            body["error"].as_str().unwrap_or("?")
-        ));
-    } else {
-        ui::success(&format!("Hand instance '{id}' paused."));
-    }
-}
-
-fn cmd_hand_resume(id: &str) {
-    let base = require_daemon("hand resume");
-    let client = daemon_client();
-    let body = daemon_json(
-        client
-            .post(format!("{base}/api/hands/instances/{id}/resume"))
-            .send(),
-    );
-    if body.get("error").is_some() {
-        ui::error(&format!(
-            "Failed: {}",
-            body["error"].as_str().unwrap_or("?")
-        ));
-    } else {
-        ui::success(&format!("Hand instance '{id}' resumed."));
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Provider / API key helpers
 // ---------------------------------------------------------------------------
 
@@ -4203,7 +3174,7 @@ fn provider_to_env_var(provider: &str) -> String {
 /// Test an API key by hitting the provider's models/health endpoint.
 ///
 /// Returns true if the key is accepted (status != 401/403).
-/// Returns true on timeout/network errors (best-effort — don't block setup).
+/// Returns true on timeout/network errors (best-effort 鈥?don't block setup).
 pub(crate) fn test_api_key(provider: &str, env_var: &str) -> bool {
     let key = match std::env::var(env_var) {
         Ok(k) => k,
@@ -4215,7 +3186,7 @@ pub(crate) fn test_api_key(provider: &str, env_var: &str) -> bool {
         .build()
     {
         Ok(c) => c,
-        Err(_) => return true, // can't build client — assume ok
+        Err(_) => return true, // can't build client 鈥?assume ok
     };
 
     let result = match provider.to_lowercase().as_str() {
@@ -4245,7 +3216,7 @@ pub(crate) fn test_api_key(provider: &str, env_var: &str) -> bool {
             .get("https://openrouter.ai/api/v1/models")
             .bearer_auth(&key)
             .send(),
-        _ => return true, // unknown provider — skip test
+        _ => return true, // unknown provider 鈥?skip test
     };
 
     match result {
@@ -4253,7 +3224,7 @@ pub(crate) fn test_api_key(provider: &str, env_var: &str) -> bool {
             let status = resp.status().as_u16();
             status != 401 && status != 403
         }
-        Err(_) => true, // network error — don't block setup
+        Err(_) => true, // network error 鈥?don't block setup
     }
 }
 
@@ -4491,7 +3462,7 @@ fn cmd_config_set(key: &str, value: &str) {
             _ => toml::Value::String(value.to_string()),
         }
     } else {
-        // No existing value — infer type from the string content
+        // No existing value 鈥?infer type from the string content
         if let Ok(b) = value.parse::<bool>() {
             toml::Value::Boolean(b)
         } else if let Ok(i) = value.parse::<u64>() {
@@ -4507,7 +3478,7 @@ fn cmd_config_set(key: &str, value: &str) {
 
     tbl.insert(last_key.to_string(), new_value);
 
-    // Write back (note: this strips comments — warned in help text)
+    // Write back (note: this strips comments 鈥?warned in help text)
     let serialized = toml::to_string_pretty(&table).unwrap_or_else(|e| {
         ui::error(&format!("Failed to serialize config: {e}"));
         std::process::exit(1);
@@ -4573,7 +3544,7 @@ fn cmd_config_unset(key: &str) {
         std::process::exit(1);
     }
 
-    // Write back (note: this strips comments — warned in help text)
+    // Write back (note: this strips comments 鈥?warned in help text)
     let serialized = toml::to_string_pretty(&table).unwrap_or_else(|e| {
         ui::error(&format!("Failed to serialize config: {e}"));
         std::process::exit(1);
@@ -4691,318 +3662,6 @@ pub(crate) fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) {
             } else {
                 let _ = std::fs::copy(&path, &dest_path);
             }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Integration commands (openfang add/remove/integrations)
-// ---------------------------------------------------------------------------
-
-fn cmd_integration_add(name: &str, key: Option<&str>) {
-    let home = openfang_home();
-    let mut registry = openfang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
-    let _ = registry.load_installed();
-
-    // Check template exists
-    let template = match registry.get_template(name) {
-        Some(t) => t.clone(),
-        None => {
-            ui::error(&format!("Unknown integration: '{name}'"));
-            println!("\nAvailable integrations:");
-            for t in registry.list_templates() {
-                println!("  {} {} — {}", t.icon, t.id, t.description);
-            }
-            std::process::exit(1);
-        }
-    };
-
-    // Set up credential resolver
-    let dotenv_path = home.join(".env");
-    let vault_path = home.join("vault.enc");
-    let vault = if vault_path.exists() {
-        let mut v = openfang_extensions::vault::CredentialVault::new(vault_path);
-        if v.unlock().is_ok() {
-            Some(v)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let mut resolver =
-        openfang_extensions::credentials::CredentialResolver::new(vault, Some(&dotenv_path))
-            .with_interactive(true);
-
-    // Build provided keys map
-    let mut provided_keys = std::collections::HashMap::new();
-    if let Some(key_value) = key {
-        // Auto-detect which env var to use (first required_env that's a secret)
-        if let Some(env_var) = template.required_env.iter().find(|e| e.is_secret) {
-            provided_keys.insert(env_var.name.clone(), key_value.to_string());
-        }
-    }
-
-    match openfang_extensions::installer::install_integration(
-        &mut registry,
-        &mut resolver,
-        name,
-        &provided_keys,
-    ) {
-        Ok(result) => {
-            match &result.status {
-                openfang_extensions::IntegrationStatus::Ready => {
-                    ui::success(&result.message);
-                }
-                openfang_extensions::IntegrationStatus::Setup => {
-                    println!("{}", result.message.yellow());
-                    println!("\nTo add credentials:");
-                    for env in &template.required_env {
-                        if env.is_secret {
-                            println!("  openfang vault set {}  # {}", env.name, env.help);
-                            if let Some(ref url) = env.get_url {
-                                println!("  Get it here: {url}");
-                            }
-                        }
-                    }
-                }
-                _ => println!("{}", result.message),
-            }
-
-            // If daemon is running, trigger hot-reload
-            if let Some(base_url) = find_daemon() {
-                let client = daemon_client();
-                let _ = client
-                    .post(format!("{base_url}/api/integrations/reload"))
-                    .send();
-            }
-        }
-        Err(e) => {
-            ui::error(&e.to_string());
-            std::process::exit(1);
-        }
-    }
-}
-
-fn cmd_integration_remove(name: &str) {
-    let home = openfang_home();
-    let mut registry = openfang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
-    let _ = registry.load_installed();
-
-    match openfang_extensions::installer::remove_integration(&mut registry, name) {
-        Ok(msg) => {
-            ui::success(&msg);
-            // Hot-reload daemon
-            if let Some(base_url) = find_daemon() {
-                let client = daemon_client();
-                let _ = client
-                    .post(format!("{base_url}/api/integrations/reload"))
-                    .send();
-            }
-        }
-        Err(e) => {
-            ui::error(&e.to_string());
-            std::process::exit(1);
-        }
-    }
-}
-
-fn cmd_integrations_list(query: Option<&str>) {
-    let home = openfang_home();
-    let mut registry = openfang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
-    let _ = registry.load_installed();
-
-    let dotenv_path = home.join(".env");
-    let resolver =
-        openfang_extensions::credentials::CredentialResolver::new(None, Some(&dotenv_path));
-
-    let entries = if let Some(q) = query {
-        openfang_extensions::installer::search_integrations(&registry, q)
-    } else {
-        openfang_extensions::installer::list_integrations(&registry, &resolver)
-    };
-
-    if entries.is_empty() {
-        if let Some(q) = query {
-            println!("No integrations matching '{q}'.");
-        } else {
-            println!("No integrations available.");
-        }
-        return;
-    }
-
-    // Group by category
-    let mut by_category: std::collections::BTreeMap<
-        String,
-        Vec<&openfang_extensions::installer::IntegrationListEntry>,
-    > = std::collections::BTreeMap::new();
-    for entry in &entries {
-        by_category
-            .entry(entry.category.clone())
-            .or_default()
-            .push(entry);
-    }
-
-    for (category, items) in &by_category {
-        println!("\n{}", format!("  {category}").bold());
-        for item in items {
-            let status_badge = match &item.status {
-                openfang_extensions::IntegrationStatus::Ready => "[Ready]".green().to_string(),
-                openfang_extensions::IntegrationStatus::Setup => "[Setup]".yellow().to_string(),
-                openfang_extensions::IntegrationStatus::Available => {
-                    "[Available]".dimmed().to_string()
-                }
-                openfang_extensions::IntegrationStatus::Error(msg) => {
-                    format!("[Error: {msg}]").red().to_string()
-                }
-                openfang_extensions::IntegrationStatus::Disabled => {
-                    "[Disabled]".dimmed().to_string()
-                }
-            };
-            println!(
-                "    {} {:<20} {:<12} {}",
-                item.icon, item.id, status_badge, item.description
-            );
-        }
-    }
-    println!();
-    println!(
-        "  {} integrations ({} installed)",
-        entries.len(),
-        entries
-            .iter()
-            .filter(|e| matches!(
-                e.status,
-                openfang_extensions::IntegrationStatus::Ready
-                    | openfang_extensions::IntegrationStatus::Setup
-            ))
-            .count()
-    );
-    println!("  Use `openfang add <name>` to install an integration.");
-}
-
-// ---------------------------------------------------------------------------
-// Vault commands (openfang vault init/set/list/remove)
-// ---------------------------------------------------------------------------
-
-fn cmd_vault_init() {
-    let home = openfang_home();
-    let vault_path = home.join("vault.enc");
-    let mut vault = openfang_extensions::vault::CredentialVault::new(vault_path);
-
-    match vault.init() {
-        Ok(()) => ui::success("Credential vault initialized."),
-        Err(e) => {
-            ui::error(&e.to_string());
-            std::process::exit(1);
-        }
-    }
-}
-
-fn cmd_vault_set(key: &str) {
-    use zeroize::Zeroizing;
-
-    let home = openfang_home();
-    let vault_path = home.join("vault.enc");
-    let mut vault = openfang_extensions::vault::CredentialVault::new(vault_path);
-
-    if !vault.exists() {
-        ui::error("Vault not initialized. Run: openfang vault init");
-        std::process::exit(1);
-    }
-
-    if let Err(e) = vault.unlock() {
-        ui::error(&format!("Could not unlock vault: {e}"));
-        std::process::exit(1);
-    }
-
-    let value = prompt_input(&format!("Enter value for {key}: "));
-    if value.is_empty() {
-        ui::error("Empty value — not stored.");
-        std::process::exit(1);
-    }
-
-    match vault.set(key.to_string(), Zeroizing::new(value)) {
-        Ok(()) => ui::success(&format!("Stored '{key}' in vault.")),
-        Err(e) => {
-            ui::error(&format!("Failed to store: {e}"));
-            std::process::exit(1);
-        }
-    }
-}
-
-fn cmd_vault_list() {
-    let home = openfang_home();
-    let vault_path = home.join("vault.enc");
-    let mut vault = openfang_extensions::vault::CredentialVault::new(vault_path);
-
-    if !vault.exists() {
-        println!("Vault not initialized. Run: openfang vault init");
-        return;
-    }
-
-    if let Err(e) = vault.unlock() {
-        ui::error(&format!("Could not unlock vault: {e}"));
-        std::process::exit(1);
-    }
-
-    let keys = vault.list_keys();
-    if keys.is_empty() {
-        println!("Vault is empty.");
-    } else {
-        println!("Stored credentials ({}):", keys.len());
-        for key in keys {
-            println!("  {key}");
-        }
-    }
-}
-
-fn cmd_vault_remove(key: &str) {
-    let home = openfang_home();
-    let vault_path = home.join("vault.enc");
-    let mut vault = openfang_extensions::vault::CredentialVault::new(vault_path);
-
-    if !vault.exists() {
-        ui::error("Vault not initialized.");
-        std::process::exit(1);
-    }
-    if let Err(e) = vault.unlock() {
-        ui::error(&format!("Could not unlock vault: {e}"));
-        std::process::exit(1);
-    }
-
-    match vault.remove(key) {
-        Ok(true) => ui::success(&format!("Removed '{key}' from vault.")),
-        Ok(false) => println!("Key '{key}' not found in vault."),
-        Err(e) => {
-            ui::error(&format!("Failed to remove: {e}"));
-            std::process::exit(1);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Scaffold commands (openfang new skill/integration)
-// ---------------------------------------------------------------------------
-
-fn cmd_scaffold(kind: ScaffoldKind) {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let result = match kind {
-        ScaffoldKind::Skill => {
-            openfang_extensions::installer::scaffold_skill(&cwd.join("my-skill"))
-        }
-        ScaffoldKind::Integration => {
-            openfang_extensions::installer::scaffold_integration(&cwd.join("my-integration"))
-        }
-    };
-    match result {
-        Ok(msg) => ui::success(&msg),
-        Err(e) => {
-            ui::error(&e.to_string());
-            std::process::exit(1);
         }
     }
 }
@@ -5224,7 +3883,7 @@ fn cmd_models_set(model: Option<String>) {
     }
 }
 
-/// Interactive model picker — shows numbered list, accepts number or model ID.
+/// Interactive model picker 鈥?shows numbered list, accepts number or model ID.
 fn pick_model() -> String {
     let catalog = openfang_runtime::model_catalog::ModelCatalog::new();
     let models = catalog.list_models();
@@ -5403,7 +4062,15 @@ fn cmd_cron_create(agent: &str, spec: &str, prompt: &str, explicit_name: Option<
             .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
             .take(64)
             .collect();
-        format!("{}-{}", agent, if short_prompt.is_empty() { "job" } else { &short_prompt })
+        format!(
+            "{}-{}",
+            agent,
+            if short_prompt.is_empty() {
+                "job"
+            } else {
+                &short_prompt
+            }
+        )
     };
 
     let body = daemon_json(
@@ -6040,7 +4707,7 @@ fn cmd_reset(confirm: bool) {
 
     if !openfang_dir.exists() {
         println!(
-            "Nothing to reset — {} does not exist.",
+            "Nothing to reset 鈥?{} does not exist.",
             openfang_dir.display()
         );
         return;
@@ -6086,15 +4753,15 @@ fn cmd_uninstall(confirm: bool, keep_config: bool) {
     if openfang_dir.exists() {
         if keep_config {
             println!(
-                "  • Remove data in {} (keeping config files)",
+                "  鈥?Remove data in {} (keeping config files)",
                 openfang_dir.display()
             );
         } else {
-            println!("  • Remove {}", openfang_dir.display());
+            println!("  鈥?Remove {}", openfang_dir.display());
         }
     }
     if let Some(ref exe) = exe_path {
-        println!("  • Remove binary: {}", exe.display());
+        println!("  鈥?Remove binary: {}", exe.display());
     }
     // Check cargo bin path
     let cargo_bin = dirs::home_dir()
@@ -6107,10 +4774,10 @@ fn cmd_uninstall(confirm: bool, keep_config: bool) {
             "openfang"
         });
     if cargo_bin.exists() && exe_path.as_ref().is_none_or(|e| *e != cargo_bin) {
-        println!("  • Remove cargo binary: {}", cargo_bin.display());
+        println!("  鈥?Remove cargo binary: {}", cargo_bin.display());
     }
-    println!("  • Remove auto-start entries (if any)");
-    println!("  • Clean PATH from shell configs (if any)");
+    println!("  鈥?Remove auto-start entries (if any)");
+    println!("  鈥?Clean PATH from shell configs (if any)");
     println!();
 
     // Step 2: Confirm
@@ -6157,10 +4824,7 @@ fn cmd_uninstall(confirm: bool, keep_config: bool) {
         } else {
             match std::fs::remove_dir_all(&openfang_dir) {
                 Ok(()) => ui::success(&format!("Removed {}", openfang_dir.display())),
-                Err(e) => ui::error(&format!(
-                    "Failed to remove {}: {e}",
-                    openfang_dir.display()
-                )),
+                Err(e) => ui::error(&format!("Failed to remove {}: {e}", openfang_dir.display())),
             }
         }
     }
@@ -6169,10 +4833,7 @@ fn cmd_uninstall(confirm: bool, keep_config: bool) {
     if cargo_bin.exists() && exe_path.as_ref().is_none_or(|e| *e != cargo_bin) {
         match std::fs::remove_file(&cargo_bin) {
             Ok(()) => ui::success(&format!("Removed {}", cargo_bin.display())),
-            Err(e) => ui::error(&format!(
-                "Failed to remove {}: {e}",
-                cargo_bin.display()
-            )),
+            Err(e) => ui::error(&format!("Failed to remove {}: {e}", cargo_bin.display())),
         }
     }
 
@@ -6204,7 +4865,7 @@ fn remove_autostart_entries(home: &std::path::Path) {
             Ok(o) if o.status.success() => {
                 ui::success("Removed Windows auto-start registry entry");
             }
-            _ => {} // Entry didn't exist — that's fine
+            _ => {} // Entry didn't exist 鈥?that's fine
         }
     }
 
@@ -6375,7 +5036,7 @@ fn remove_dir_except_config(openfang_dir: &std::path::Path) {
 fn remove_self_binary(exe_path: &std::path::Path) {
     #[cfg(unix)]
     {
-        // On Unix, running binaries can be unlinked — the OS keeps the inode
+        // On Unix, running binaries can be unlinked 鈥?the OS keeps the inode
         // alive until the process exits.
         match std::fs::remove_file(exe_path) {
             Ok(()) => ui::success(&format!("Removed {}", exe_path.display())),
@@ -6412,7 +5073,10 @@ fn remove_self_binary(exe_path: &std::path::Path) {
             .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
             .spawn();
 
-        ui::success(&format!("Removed {} (deferred cleanup)", exe_path.display()));
+        ui::success(&format!(
+            "Removed {} (deferred cleanup)",
+            exe_path.display()
+        ));
     }
 }
 
@@ -6428,16 +5092,6 @@ mod tests {
         let count = skill_reg.load_bundled();
         assert!(count > 0, "Should load bundled skills");
         assert_eq!(skill_reg.count(), count);
-    }
-
-    #[test]
-    fn test_doctor_extension_registry_loads_bundled() {
-        let tmp = std::env::temp_dir().join("openfang-doctor-test-ext");
-        let _ = std::fs::create_dir_all(&tmp);
-        let mut ext_reg = openfang_extensions::registry::IntegrationRegistry::new(&tmp);
-        let count = ext_reg.load_bundled();
-        assert!(count > 0, "Should load bundled integration templates");
-        assert_eq!(ext_reg.template_count(), count);
     }
 
     #[test]

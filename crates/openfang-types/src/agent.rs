@@ -482,6 +482,15 @@ pub struct AgentManifest {
     /// Tool blocklist — these tools are excluded (applied after allowlist).
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub tool_blocklist: Vec<String>,
+    /// Optional tactical-brain policy: which [`CommandClass`]es this persona
+    /// may emit, which autonomy modes it may run under, and whether every
+    /// emitted intent requires human approval. `None` (the default) means the
+    /// agent is not a tactical persona and only the standard platform gates
+    /// apply.
+    ///
+    /// [`CommandClass`]: crate::tactical::CommandClass
+    #[serde(default)]
+    pub tactical_policy: Option<crate::tactical::TacticalAgentPolicy>,
 }
 
 fn default_true() -> bool {
@@ -516,6 +525,7 @@ impl Default for AgentManifest {
             exec_policy: None,
             tool_allowlist: Vec::new(),
             tool_blocklist: Vec::new(),
+            tactical_policy: None,
         }
     }
 }
@@ -773,11 +783,40 @@ mod tests {
             exec_policy: None,
             tool_allowlist: Vec::new(),
             tool_blocklist: Vec::new(),
+            tactical_policy: None,
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let deserialized: AgentManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "test-agent");
         assert_eq!(deserialized.tags, vec!["test".to_string()]);
+    }
+
+    #[test]
+    fn test_manifest_with_tactical_policy() {
+        let policy = crate::tactical::TacticalAgentPolicy {
+            allowed_command_classes: vec!["motion".into(), "sensor".into()],
+            allowed_autonomy_modes: vec!["supervised_autonomy".into()],
+            requires_human_approval: false,
+            advisory_only: false,
+        };
+        let manifest = AgentManifest {
+            name: "na".into(),
+            tactical_policy: Some(policy.clone()),
+            ..Default::default()
+        };
+        let toml_str = toml::to_string(&manifest).unwrap();
+        let back: AgentManifest = toml::from_str(&toml_str).unwrap();
+        assert_eq!(back.tactical_policy, Some(policy));
+    }
+
+    #[test]
+    fn test_manifest_tactical_policy_defaults_to_none() {
+        let toml_str = r#"
+name = "plain-agent"
+version = "0.1.0"
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert!(manifest.tactical_policy.is_none());
     }
 
     // ----- ToolProfile tests -----

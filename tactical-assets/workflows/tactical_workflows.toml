@@ -1,0 +1,869 @@
+# =============================================================================
+# Tactical Workflow Definitions — Phase 4
+# =============================================================================
+
+# ── Core Workflows ──
+
+[[workflow]]
+name = "Patrol"
+description = "Standard patrol cycle: CA link check → TCA tactical assessment → NA navigation → SMA sensor sweep"
+mode = "sequential"
+trigger = { type = "periodic", interval_secs = 10 }
+
+[[workflow.step]]
+agent = "ca"
+action = "check_link_status"
+timeout_secs = 2
+
+[[workflow.step]]
+agent = "tca"
+action = "tactical_assessment"
+timeout_secs = 8
+
+[[workflow.step]]
+agent = "na"
+action = "navigate_to_next_waypoint"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "sma"
+action = "sensor_sweep"
+timeout_secs = 5
+
+[workflow.play]
+preconditions = ["has_sensor"]
+expected_roi = 0.5
+functions = ["patrol_leg", "sensor_on"]
+[workflow.play.effect_model]
+isr_coverage = 0.4
+[workflow.play.risk_model]
+exposure = 0.1
+[workflow.play.required_roles]
+patrol = "any"
+
+# ── Track Workflow ──
+
+[[workflow]]
+name = "Track"
+description = "Multi-sensor track fusion: SMA detect → FCA threat assess → NA collision check → TCA fusion"
+mode = "fan_out"
+trigger = { type = "event", event = "NewContact" }
+
+[[workflow.step]]
+agent = "sma"
+action = "classify_contact"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "fca"
+action = "assess_threat"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "na"
+action = "check_collision_risk"
+timeout_secs = 2
+
+[[workflow.step]]
+agent = "tca"
+action = "fuse_assessment"
+timeout_secs = 8
+
+[workflow.play]
+preconditions = ["has_sensor", "has_target"]
+expected_roi = 0.6
+functions = ["track_sensor", "designate"]
+[workflow.play.effect_model]
+track_quality = 0.7
+[workflow.play.risk_model]
+exposure = 0.15
+[workflow.play.required_roles]
+recon = "any"
+
+# ── Engage Workflow ──
+
+[[workflow]]
+name = "Engage"
+description = "Full engagement chain: TCA designate → FCA compute → ApprovalManager quorum → FCA fire → ApprovalManager confirm"
+mode = "sequential"
+trigger = { type = "command", command = "engage_target" }
+
+[[workflow.step]]
+agent = "tca"
+action = "designate_target"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "fca"
+action = "compute_firing_solution"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "approval_manager"
+action = "request_quorum"
+required_signers = 2
+timeout_secs = 15
+
+[[workflow.step]]
+agent = "fca"
+action = "fire"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "fma"
+action = "bda"
+timeout_secs = 10
+
+[workflow.play]
+preconditions = ["has_weapon", "has_target", "pid_or_designated"]
+expected_roi = 0.7
+functions = ["designate", "fire", "bda"]
+[workflow.play.effect_model]
+suppression = 0.8
+[workflow.play.risk_model]
+exposure = 0.3
+fratricide = 0.05
+[workflow.play.required_roles]
+strike = "cca"
+
+# ── Survive Workflow ──
+
+[[workflow]]
+name = "Survive"
+description = "Survival mode: LinkLost trigger → auto_approve_autonomous → energy priority → minimal emissions"
+mode = "sequential"
+trigger = { type = "event", event = "LinkLost" }
+
+[[workflow.step]]
+agent = "ca"
+action = "confirm_link_lost"
+timeout_secs = 2
+
+[[workflow.step]]
+agent = "tca"
+action = "switch_to_autonomous_l5"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "na"
+action = "energy_efficient_course"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "sma"
+action = "emission_control_alpha"
+timeout_secs = 2
+
+# ── Scuttle Workflow ──
+
+[[workflow]]
+name = "Scuttle"
+description = "Self-destruct sequence: 3-party HMAC verify → broadcast abandon → terminate systems"
+mode = "sequential"
+trigger = { type = "command", command = "scuttle" }
+
+[[workflow.step]]
+agent = "self_destruct_guard"
+action = "verify_three_party"
+timeout_secs = 30
+
+[[workflow.step]]
+agent = "ca"
+action = "broadcast_abandon"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "tca"
+action = "terminate_all"
+timeout_secs = 10
+
+# ── Coordinated Strike Workflow (UAV) ──
+
+[[workflow]]
+name = "CoordinatedStrike"
+description = "USV suppresses air defense → Strike UAVs attack → BDA UAV assesses"
+mode = "sequential"
+trigger = { type = "command", command = "coordinated_strike" }
+
+[[workflow.step]]
+agent = "tca"
+action = "plan_strike_package"
+timeout_secs = 8
+
+[[workflow.step]]
+agent = "fma"
+action = "assign_strike_uavs"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "fca"
+action = "suppress_air_defense"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "fma"
+action = "execute_strike"
+timeout_secs = 10
+
+[[workflow.step]]
+agent = "fma"
+action = "bda"
+timeout_secs = 8
+
+[workflow.play]
+preconditions = ["has_weapon", "has_target", "pid_or_designated"]
+expected_roi = 0.75
+functions = ["designate", "coordinated_strike", "bda"]
+[workflow.play.effect_model]
+suppression = 0.9
+[workflow.play.risk_model]
+exposure = 0.35
+fratricide = 0.05
+[workflow.play.required_roles]
+coordinator = "usv"
+strike = "cca"
+
+# ── Recon-to-Strike Workflow (UAV) ──
+
+[[workflow]]
+name = "ReconToStrike"
+description = "Recon UAV identifies target → TCA evaluates → Strike UAV engages"
+mode = "sequential"
+trigger = { type = "event", event = "HighValueContact" }
+
+[[workflow.step]]
+agent = "sma"
+action = "cue_recon_uav"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "fma"
+action = "recon_mission"
+timeout_secs = 15
+
+[[workflow.step]]
+agent = "tca"
+action = "evaluate_target"
+timeout_secs = 8
+
+[[workflow.step]]
+agent = "fma"
+action = "assign_strike"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "fca"
+action = "time_on_target_sync"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "fma"
+action = "bda"
+timeout_secs = 8
+
+[workflow.play]
+preconditions = ["has_recon", "has_strike", "target_designated_or_labeled"]
+expected_roi = 0.7
+functions = ["recon_flank_route", "designate", "coordinated_strike", "bda"]
+[workflow.play.effect_model]
+isr_coverage = 0.8
+suppression = 0.7
+[workflow.play.risk_model]
+exposure = 0.3
+fratricide = 0.05
+[workflow.play.required_roles]
+recon = "lsuav"
+strike = "cca"
+
+# ── Fleet Launch Workflow (UAV) ──
+
+[[workflow]]
+name = "FleetLaunch"
+description = "Launch and form up the UAV package: deck prep → sequenced launch → assign initial roles → form up"
+mode = "sequential"
+trigger = { type = "command", command = "launch_fleet" }
+
+[[workflow.step]]
+agent = "fma"
+action = "deck_prep"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "fma"
+action = "sequence_launch"
+timeout_secs = 30
+
+[[workflow.step]]
+agent = "fma"
+action = "assign_initial_roles"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "fma"
+action = "form_up"
+timeout_secs = 10
+
+# ── Fleet Recovery Workflow (UAV) ──
+
+[[workflow]]
+name = "FleetRecovery"
+description = "Recall all UAVs for recovery: RTB sequence → deck management"
+mode = "sequential"
+trigger = { type = "command", command = "recover_fleet" }
+
+[[workflow.step]]
+agent = "ca"
+action = "broadcast_rtb"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "fma"
+action = "sequence_recovery"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "fma"
+action = "recover_uavs"
+timeout_secs = 30
+
+[[workflow.step]]
+agent = "fma"
+action = "deck_reconfigure"
+timeout_secs = 10
+
+[workflow.play]
+preconditions = []
+expected_roi = 0.4
+functions = ["rtb"]
+[workflow.play.effect_model]
+recovery = 1.0
+[workflow.play.risk_model]
+exposure = 0.05
+[workflow.play.required_roles]
+patrol = "any"
+
+# ── Auto Task Reallocate Workflow (UAV) ──
+
+[[workflow]]
+name = "AutoTaskReallocate"
+description = "UAV lost in action → FMA reassigns its mission to remaining assets"
+mode = "sequential"
+trigger = { type = "event", event = "UavLost" }
+
+[[workflow.step]]
+agent = "fma"
+action = "assess_remaining_capability"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "fma"
+action = "reassign_missions"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "tca"
+action = "confirm_reallocation"
+timeout_secs = 5
+
+# ── Comm Relay Handoff Workflow (UAV) ──
+
+[[workflow]]
+name = "CommRelayHandoff"
+description = "Comm link degraded → deploy relay UAV → establish relay link"
+mode = "sequential"
+trigger = { type = "event", event = "LinkDegraded" }
+
+[[workflow.step]]
+agent = "ca"
+action = "assess_link_quality"
+timeout_secs = 2
+
+[[workflow.step]]
+agent = "fma"
+action = "launch_relay_uav"
+timeout_secs = 10
+
+[[workflow.step]]
+agent = "fma"
+action = "relay_enable"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "ca"
+action = "switch_to_relay_link"
+timeout_secs = 5
+
+# =============================================================================
+# Electronic Warfare (EW) Workflows
+# -----------------------------------------------------------------------------
+# `scope` selects where the workflow runs:
+#   own        = this instance's own platform/subsystems (single-instance default)
+#   formation  = requires peer members; only active when fleet_role = "lead"
+# Own-scope EW workflows map to an own CcaRole (EwJamming / EwProtection / Decoy)
+# which the brain fans out to the cerebellum EW/Sensor/Comm lanes. The Iron Law
+# still holds: these layers only safe weapons, never fire.
+# =============================================================================
+
+# ── Electronic Attack (active jamming) ──
+
+[[workflow]]
+name = "ElectronicAttack"
+description = "Active electronic attack: SMA geolocate emitter → TCA assign EwJamming role → FMA push role → SMA assess jamming effect"
+mode = "sequential"
+scope = "own"
+trigger = { type = "event", event = "ThreatEmitter" }
+
+[[workflow.step]]
+agent = "sma"
+action = "emitter_geolocate"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "tca"
+action = "assign_ew_jamming_role"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "fma"
+action = "assign_uav_role"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "sma"
+action = "bda_emcon"
+timeout_secs = 5
+
+# ── EW Protection (defensive soft-kill) ──
+
+[[workflow]]
+name = "EwProtection"
+description = "Defensive EW on incoming guided threat: TCA designate protected asset → FMA assign EwProtection role → NA evasive geometry"
+mode = "sequential"
+scope = "own"
+trigger = { type = "event", event = "IncomingMunition" }
+
+[[workflow.step]]
+agent = "tca"
+action = "designate_protected_asset"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "fma"
+action = "assign_ew_protection_role"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "na"
+action = "evasive_geometry"
+timeout_secs = 3
+
+# ── Decoy (draw fire / buy separation) ──
+
+[[workflow]]
+name = "Decoy"
+description = "Decoy tow: TCA select decoy → FMA assign Decoy role (EMCON active, conspicuous) → NA reposition high-value asset"
+mode = "sequential"
+scope = "formation"
+trigger = { type = "command", command = "deploy_decoy" }
+
+[[workflow.step]]
+agent = "tca"
+action = "select_decoy"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "fma"
+action = "assign_decoy_role"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "na"
+action = "reposition_hva"
+timeout_secs = 5
+
+# ── SEAD (suppression of enemy air defense: EW + fires) ──
+
+[[workflow]]
+name = "SEAD"
+description = "Suppress enemy air defense: SMA map threat emitters → TCA plan SEAD → FMA assign EwJamming → FCA anti-radiation strike (quorum) → SMA BDA"
+mode = "sequential"
+scope = "formation"
+trigger = { type = "command", command = "sead" }
+
+[[workflow.step]]
+agent = "sma"
+action = "threat_emitter_map"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "tca"
+action = "plan_sead"
+timeout_secs = 8
+
+[[workflow.step]]
+agent = "fma"
+action = "assign_ew_jamming_role"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "fca"
+action = "suppress_air_defense"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "approval_manager"
+action = "request_quorum"
+required_signers = 2
+timeout_secs = 15
+
+[[workflow.step]]
+agent = "sma"
+action = "bda"
+timeout_secs = 8
+
+# ── Recon Patrol Workflow (UAV ISR, flank approach) ──
+
+[[workflow]]
+name = "ReconPatrol"
+description = "Flank-approach ISR: NA plan flank route → SMA collect → TCA designate high-value contact"
+mode = "sequential"
+scope = "own"
+trigger = { type = "command", command = "recon_patrol" }
+
+[[workflow.step]]
+agent = "na"
+action = "deploy_recon_uav"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "sma"
+action = "surveil_target_area"
+timeout_secs = 10
+
+[[workflow.step]]
+agent = "tca"
+action = "track_target_area"
+timeout_secs = 5
+
+[workflow.play]
+preconditions = ["has_sensor"]
+expected_roi = 0.6
+functions = ["deploy_recon_uav", "surveil_target_area", "track_target_area", "recon_flank_route", "sensor_on", "designate"]
+[workflow.play.effect_model]
+isr_coverage = 0.8
+[workflow.play.risk_model]
+exposure = 0.2
+[workflow.play.required_roles]
+recon = "lsuav"
+
+# =============================================================================
+# Commander-level mission templates (standalone / own-scope)
+# -----------------------------------------------------------------------------
+# These complement the offensive ISR-strike loop (Patrol/Track/Engage/
+# ReconToStrike) with the defensive, enabling, screening, escort, interdiction
+# and deception missions a maritime commander tasks the mothership with.
+# All own-scope: they map to the mothership's own assets (recon UAV / hunter-
+# killer UAV / autocannon). Weapon steps still pass through approval_manager
+# quorum + CommandGate (weapons-tight); the Iron Law holds — these chains only
+# produce intents, they never fire directly.
+# =============================================================================
+
+# ── Reactive Defense (evade + soft-kill + ISR support) ──
+
+[[workflow]]
+name = "ReactiveDefense"
+description = "Reactive defense against inbound munition: MMS evasive maneuver + EWMS chaff/jam + WMS deploy recon UAV for follow-on ISR"
+mode = "parallel"
+scope = "own"
+trigger = { type = "event", event = "IncomingMunition" }
+
+[[workflow.step]]
+agent = "na"
+action = "evasive_maneuver"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "ewma"
+action = "release_decoy"
+timeout_secs = 2
+
+[[workflow.step]]
+agent = "ewma"
+action = "start_jam"
+timeout_secs = 2
+
+[[workflow.step]]
+agent = "fca"
+action = "deploy_recon_uav"
+timeout_secs = 5
+
+[workflow.play]
+preconditions = ["threat_present"]
+expected_roi = 0.9
+functions = ["evasive_maneuver", "release_decoy", "start_jam", "deploy_recon_uav"]
+[workflow.play.effect_model]
+self_protection = 0.9
+track_refinement = 0.55
+[workflow.play.risk_model]
+exposure = 0.1
+emcon = 0.25
+[workflow.play.required_roles]
+defense = "self"
+
+# ── Point Defense (close-in hard-kill self-defense / counter-swarm) ──
+
+[[workflow]]
+name = "PointDefense"
+description = "Close-in hard-kill self-defense: SMA classify inbound swarm/threat → FCA gun firing solution → quorum → FCA autocannon CIWS engage → SMA BDA"
+mode = "sequential"
+scope = "own"
+trigger = { type = "event", event = "InboundThreat" }
+
+[[workflow.step]]
+agent = "sma"
+action = "classify_swarm_contacts"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "fca"
+action = "compute_gun_solution"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "approval_manager"
+action = "request_quorum"
+required_signers = 1
+timeout_secs = 10
+
+[[workflow.step]]
+agent = "fca"
+action = "engage_gun_ciws"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "sma"
+action = "bda"
+timeout_secs = 3
+
+[workflow.play]
+preconditions = ["has_weapon", "has_sensor", "threat_present"]
+expected_roi = 0.85
+functions = ["designate", "fire", "bda"]
+[workflow.play.effect_model]
+self_protection = 0.9
+[workflow.play.risk_model]
+exposure = 0.2
+fratricide = 0.02
+[workflow.play.required_roles]
+defense = "self"
+
+# ── Targeting Handoff (over-the-horizon targeting / midcourse guidance) ──
+
+[[workflow]]
+name = "TargetingHandoff"
+description = "OTH targeting / midcourse guidance: recon UAV refines track → TCA positive ID → FMA weapon guidance handoff → FCA midcourse update → SMA BDA"
+mode = "sequential"
+scope = "own"
+trigger = { type = "event", event = "HighValueContact" }
+
+[[workflow.step]]
+agent = "sma"
+action = "recon_uav_track_refine"
+timeout_secs = 10
+
+[[workflow.step]]
+agent = "tca"
+action = "positive_id_evaluate"
+timeout_secs = 8
+
+[[workflow.step]]
+agent = "fma"
+action = "weapon_guidance_handoff"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "fca"
+action = "midcourse_guidance_update"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "sma"
+action = "bda"
+timeout_secs = 8
+
+[workflow.play]
+preconditions = ["has_recon", "has_target", "pid_or_designated"]
+expected_roi = 0.8
+functions = ["designate", "midcourse_guidance", "bda"]
+[workflow.play.effect_model]
+targeting_quality = 0.85
+[workflow.play.risk_model]
+exposure = 0.25
+[workflow.play.required_roles]
+recon = "lsuav"
+shooter = "cca"
+
+# ── Picket (forward screen / early warning station) ──
+
+[[workflow]]
+name = "Picket"
+description = "Forward picket / screen: NA plan picket station → SMA persistent passive surveillance (EMCON) → TCA early-warning assess → CA report to higher"
+mode = "sequential"
+scope = "own"
+trigger = { type = "periodic", interval_secs = 30 }
+
+[[workflow.step]]
+agent = "na"
+action = "plan_picket_station"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "sma"
+action = "persistent_passive_surveillance"
+timeout_secs = 10
+
+[[workflow.step]]
+agent = "tca"
+action = "early_warning_assess"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "ca"
+action = "report_to_higher"
+timeout_secs = 3
+
+[workflow.play]
+preconditions = ["has_sensor"]
+expected_roi = 0.55
+functions = ["patrol_leg", "sensor_on"]
+[workflow.play.effect_model]
+early_warning = 0.7
+[workflow.play.risk_model]
+exposure = 0.15
+[workflow.play.required_roles]
+picket = "any"
+
+# ── Escort (accompanying protection of a high-value unit) ──
+
+[[workflow]]
+name = "Escort"
+description = "Escort / accompanying protection: NA station-keep on protected unit → SMA sector search → FCA counter-small-target readiness → TCA threat assess"
+mode = "sequential"
+scope = "own"
+trigger = { type = "command", command = "escort" }
+
+[[workflow.step]]
+agent = "na"
+action = "station_keep_on_protected_unit"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "sma"
+action = "sector_search"
+timeout_secs = 8
+
+[[workflow.step]]
+agent = "fca"
+action = "counter_small_target_readiness"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "tca"
+action = "threat_assess"
+timeout_secs = 5
+
+[workflow.play]
+preconditions = ["has_sensor"]
+expected_roi = 0.6
+functions = ["patrol_leg", "sensor_on", "designate"]
+[workflow.play.effect_model]
+protection = 0.75
+[workflow.play.risk_model]
+exposure = 0.2
+[workflow.play.required_roles]
+escort = "any"
+
+# ── Maritime Interdiction (approach & query, non-kinetic first) ──
+
+[[workflow]]
+name = "MaritimeInterdiction"
+description = "Maritime interdiction / approach & query (non-kinetic first): SMA classify suspect → NA intercept geometry → CA hail and warn → FCA warning-shot readiness (gun, weapons-tight) → TCA escalation decision"
+mode = "sequential"
+scope = "own"
+trigger = { type = "command", command = "interdict" }
+
+[[workflow.step]]
+agent = "sma"
+action = "classify_suspect_vessel"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "na"
+action = "intercept_geometry_close"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "ca"
+action = "hail_and_warn"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "fca"
+action = "warning_shot_readiness"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "tca"
+action = "escalation_decision"
+timeout_secs = 5
+
+[workflow.play]
+preconditions = ["has_sensor"]
+expected_roi = 0.5
+functions = ["track_sensor", "designate"]
+[workflow.play.effect_model]
+deterrence = 0.7
+[workflow.play.risk_model]
+exposure = 0.3
+[workflow.play.required_roles]
+interdictor = "any"
+
+# ── Deception (feint / draw-off) ──
+
+[[workflow]]
+name = "Deception"
+description = "Feint / deception: TCA plan deception → FMA assign conspicuous decoy role → NA deceptive maneuver → SMA monitor adversary reaction"
+mode = "sequential"
+scope = "own"
+trigger = { type = "command", command = "feint" }
+
+[[workflow.step]]
+agent = "tca"
+action = "plan_deception"
+timeout_secs = 8
+
+[[workflow.step]]
+agent = "fma"
+action = "assign_conspicuous_decoy_role"
+timeout_secs = 3
+
+[[workflow.step]]
+agent = "na"
+action = "deceptive_maneuver"
+timeout_secs = 5
+
+[[workflow.step]]
+agent = "sma"
+action = "monitor_adversary_reaction"
+timeout_secs = 5
+
+[workflow.play]
+preconditions = []
+expected_roi = 0.45
+functions = ["patrol_leg"]
+[workflow.play.effect_model]
+deception = 0.6
+[workflow.play.risk_model]
+exposure = 0.35
+[workflow.play.required_roles]
+decoy = "any"

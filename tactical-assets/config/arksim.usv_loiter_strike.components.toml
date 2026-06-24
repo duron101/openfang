@@ -1,0 +1,50 @@
+# ArkSIM/Warlock stable component manifest for usv_loiter_strike.
+#
+# Records scenario-authoritative weapon inventories (initial magazine counts).
+# Live StateMessage snapshots should carry the same `quantityRemaining` values
+# and supersede this file once telemetry reports them. OpenFang only seeds from
+# manifest when a weapon component is present in the snapshot but the live frame
+# omitted `quantityRemaining`.
+#
+# Dynamic track ids such as `self:9` are intentionally excluded and must be
+# resolved from live StateMessage tracks.
+[[platforms]]
+id = "self"
+aliases = ["ownship", "red_usv"]
+mover = "mover"
+comms = ["usv_cmd_radio", "usv_loiter_radio"]
+
+[[platforms.sensors]]
+id = "eoir"
+sensor_type = "e_o_i_r"
+mode = "SEARCH"
+
+[[platforms.sensors]]
+id = "surf_radar"
+sensor_type = "radar"
+mode = "SEARCH"
+
+[[platforms.weapons]]
+id = "gun_30mm"
+weapon_type = "30MM_BULLET"
+quantity_remaining = 1500
+
+[[platforms.weapons]]
+id = "loiter_wave1"
+weapon_type = "RED_LOITER_MUN"
+quantity_remaining = 16
+
+[[platforms.weapons]]
+id = "loiter_wave2"
+weapon_type = "RED_LOITER_MUN"
+quantity_remaining = 16
+
+[[platforms.weapons]]
+id = "loiter_wave3"
+weapon_type = "RED_LOITER_MUN"
+quantity_remaining = 16
+
+[[platforms.weapons]]
+id = "scout_uav_slot"
+weapon_type = "SCOUT_UAV_SLOT"
+quantity_remaining = 2

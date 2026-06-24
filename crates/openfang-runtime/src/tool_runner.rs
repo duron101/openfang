@@ -168,6 +168,36 @@ pub async fn execute_tool(
         }
     }
 
+    // Platform control tools (tactical): route to the kernel's platform layer,
+    // which maps the call to a gated CandidateIntent / PlatformCommand. These
+    // never bypass the command gate (weapons become pending engagements). The
+    // calling agent id is propagated for per-agent tactical-policy enforcement
+    // and audit provenance.
+    if crate::platform_tools::is_platform_tool(tool_name) {
+        return match kernel {
+            Some(kh) => match kh
+                .dispatch_platform_command(tool_name, input, caller_agent_id)
+                .await
+            {
+                Ok(content) => ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content,
+                    is_error: false,
+                },
+                Err(e) => ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: format!("Platform command failed: {e}"),
+                    is_error: true,
+                },
+            },
+            None => ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                content: "Platform control unavailable: no kernel handle".to_string(),
+                is_error: true,
+            },
+        };
+    }
+
     debug!(tool_name, "Executing tool");
     let result = match tool_name {
         // Filesystem tools
@@ -191,7 +221,9 @@ pub async fn execute_tool(
             let headers = input.get("headers").and_then(|v| v.as_object());
             let body = input["body"].as_str();
             if let Some(ctx) = web_ctx {
-                ctx.fetch.fetch_with_options(url, method, headers, body).await
+                ctx.fetch
+                    .fetch_with_options(url, method, headers, body)
+                    .await
             } else {
                 tool_web_fetch_legacy(input).await
             }
@@ -301,9 +333,6 @@ pub async fn execute_tool(
         "cron_list" => tool_cron_list(kernel, caller_agent_id).await,
         "cron_cancel" => tool_cron_cancel(input, kernel).await,
 
-        // Channel send tool (proactive outbound messaging)
-        "channel_send" => tool_channel_send(input, kernel).await,
-
         // Persistent process tools
         "process_start" => tool_process_start(input, process_manager, caller_agent_id).await,
         "process_poll" => tool_process_poll(input, process_manager).await,
@@ -337,8 +366,7 @@ pub async fn execute_tool(
                     crate::browser::tool_browser_navigate(input, mgr, aid).await
                 }
                 None => Err(
-                    "Browser tools not available. Ensure Chrome/Chromium is installed."
-                        .to_string(),
+                    "Browser tools not available. Ensure Chrome/Chromium is installed.".to_string(),
                 ),
             }
         }
@@ -347,63 +375,81 @@ pub async fn execute_tool(
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser::tool_browser_click(input, mgr, aid).await
             }
-            None => Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string()),
+            None => {
+                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
+            }
         },
         "browser_type" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser::tool_browser_type(input, mgr, aid).await
             }
-            None => Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string()),
+            None => {
+                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
+            }
         },
         "browser_screenshot" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser::tool_browser_screenshot(input, mgr, aid).await
             }
-            None => Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string()),
+            None => {
+                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
+            }
         },
         "browser_read_page" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser::tool_browser_read_page(input, mgr, aid).await
             }
-            None => Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string()),
+            None => {
+                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
+            }
         },
         "browser_close" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser::tool_browser_close(input, mgr, aid).await
             }
-            None => Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string()),
+            None => {
+                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
+            }
         },
         "browser_scroll" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser::tool_browser_scroll(input, mgr, aid).await
             }
-            None => Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string()),
+            None => {
+                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
+            }
         },
         "browser_wait" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser::tool_browser_wait(input, mgr, aid).await
             }
-            None => Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string()),
+            None => {
+                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
+            }
         },
         "browser_run_js" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser::tool_browser_run_js(input, mgr, aid).await
             }
-            None => Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string()),
+            None => {
+                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
+            }
         },
         "browser_back" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
                 crate::browser::tool_browser_back(input, mgr, aid).await
             }
-            None => Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string()),
+            None => {
+                Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
+            }
         },
 
         // Canvas / A2UI tool
@@ -991,24 +1037,6 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "job_id": { "type": "string", "description": "The UUID of the cron job to cancel" }
                 },
                 "required": ["job_id"]
-            }),
-        },
-        // --- Channel send tool (proactive outbound messaging) ---
-        ToolDefinition {
-            name: "channel_send".to_string(),
-            description: "Send a message or media to a user on a configured channel (email, telegram, slack, etc). For email: recipient is the email address; optionally set subject. For media: set image_url or file_url to send an image or file instead of (or alongside) text.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "channel": { "type": "string", "description": "Channel adapter name (e.g., 'email', 'telegram', 'slack', 'discord')" },
-                    "recipient": { "type": "string", "description": "Platform-specific recipient identifier (email address, user ID, etc.)" },
-                    "subject": { "type": "string", "description": "Optional subject line (used for email; ignored for other channels)" },
-                    "message": { "type": "string", "description": "The message body to send (required for text, optional caption for media)" },
-                    "image_url": { "type": "string", "description": "URL of an image to send (supported on Telegram, Discord, Slack)" },
-                    "file_url": { "type": "string", "description": "URL of a file to send as attachment" },
-                    "filename": { "type": "string", "description": "Filename for file attachments (defaults to 'file')" }
-                },
-                "required": ["channel", "recipient"]
             }),
         },
         // --- Hand tools (curated autonomous capability packages) ---
@@ -2104,80 +2132,6 @@ async fn tool_cron_cancel(
 }
 
 // ---------------------------------------------------------------------------
-// Channel send tool (proactive outbound messaging via configured adapters)
-// ---------------------------------------------------------------------------
-
-async fn tool_channel_send(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-
-    let channel = input["channel"]
-        .as_str()
-        .ok_or("Missing 'channel' parameter")?
-        .trim()
-        .to_lowercase();
-    let recipient = input["recipient"]
-        .as_str()
-        .ok_or("Missing 'recipient' parameter")?
-        .trim();
-
-    if recipient.is_empty() {
-        return Err("Recipient cannot be empty".to_string());
-    }
-
-    // Check for media content (image_url or file_url)
-    let image_url = input["image_url"].as_str().filter(|s| !s.is_empty());
-    let file_url = input["file_url"].as_str().filter(|s| !s.is_empty());
-
-    if let Some(url) = image_url {
-        let caption = input["message"].as_str().filter(|s| !s.is_empty());
-        return kh
-            .send_channel_media(&channel, recipient, "image", url, caption, None)
-            .await;
-    }
-
-    if let Some(url) = file_url {
-        let caption = input["message"].as_str().filter(|s| !s.is_empty());
-        let filename = input["filename"].as_str();
-        return kh
-            .send_channel_media(&channel, recipient, "file", url, caption, filename)
-            .await;
-    }
-
-    // Text-only message
-    let message = input["message"]
-        .as_str()
-        .ok_or("Missing 'message' parameter (required for text messages)")?;
-
-    if message.is_empty() {
-        return Err("Message cannot be empty".to_string());
-    }
-
-    // For email channels, validate email format and prepend subject
-    let final_message = if channel == "email" {
-        if !recipient.contains('@') || !recipient.contains('.') {
-            return Err(format!("Invalid email address: '{recipient}'"));
-        }
-        if let Some(subject) = input["subject"].as_str() {
-            if !subject.is_empty() {
-                format!("Subject: {subject}\n\n{message}")
-            } else {
-                message.to_string()
-            }
-        } else {
-            message.to_string()
-        }
-    } else {
-        message.to_string()
-    };
-
-    kh.send_channel_message(&channel, recipient, &final_message)
-        .await
-}
-
-// ---------------------------------------------------------------------------
 // Hand tools (delegated to kernel via KernelHandle trait)
 // ---------------------------------------------------------------------------
 
@@ -3133,8 +3087,6 @@ mod tests {
         assert!(names.contains(&"cron_create"));
         assert!(names.contains(&"cron_list"));
         assert!(names.contains(&"cron_cancel"));
-        // 1 channel send tool
-        assert!(names.contains(&"channel_send"));
         // 4 hand tools
         assert!(names.contains(&"hand_list"));
         assert!(names.contains(&"hand_activate"));

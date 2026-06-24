@@ -1,0 +1,357 @@
+# OpenFang — Tactical LAN Deployment Profile
+# For unmanned vessel / edge deployment scenarios.
+# Copy to ~/.openfang/config.toml and customize.
+
+# ─────────────────────────────────────────────
+# LLM Provider — local inference only
+# ─────────────────────────────────────────────
+[default_model]
+provider = "custom"                       # "ollama" or "custom" for localhost llama.cpp
+model = "qwen-3.6-27b-q4_k_m"            # Qwen 3.6 27B, 4-bit quantized
+api_key_env = ""                          # No API key needed for local inference
+base_url = "http://127.0.0.1:8080/v1"     # llama.cpp server OpenAI-compatible endpoint
+
+# ─────────────────────────────────────────────
+# Platform Adapter — simulation | hardware | hybrid
+# ─────────────────────────────────────────────
+[platform]
+mode = "simulation"                       # "simulation" | "hardware" | "hybrid"
+
+# ── 编队部署角色（单实例/编队联邦）──────────────────────────────────────
+# standalone = 单实例只管一架平台（默认）；lead = 编队大脑，经 OFP/A2A 给成员
+# 派角色/任务并运行 formation-scope 工作流；member = 接受 lead 角色/任务，断链自主。
+fleet_role = "standalone"                  # "standalone" | "lead" | "member"
+
+# ── 控制方 / 控制对象（LLM 慢环 + DCC 快反）────────────────────────────
+# 控制方：OpenFang/LLM 代哪一方下指令。默认 blue = 只控制蓝方平台。
+controlled_side = "blue"                    # "blue" | "red" | "friend" | "blue_and_friend"
+# 威胁方：哪些阵营/IFF 视为可打击目标（生成 engagement opportunities）。
+# 默认 "opposite" = 自动取 controlled_side 的对立阵营（自身蓝→红是威胁，自身红→蓝是威胁），
+# 并叠加 IFF（敌方/foe→威胁、友方/friend→排除）。无需随 controlled_side 手动调整。
+threat_side = "opposite"                    # "opposite" | "blue" | "red" | "foe" | "red_and_foe"
+# 控制哪一个：允许下指令的实体 id 白名单。留空 = 该控制方下全部实体。
+# 例：controlled_platforms = ["usv_alpha", "uav_scout_1"]
+controlled_platforms = []
+# DCC 快反本机实体 id（规则里 "self" 在运行时绑定到此 id）。
+own_platform_id = "self"
+# 控制方标识（审计日志 / 意图注入 issued_by 默认值）。
+controller_id = "openfang"
+# ── 武器释放权限（ROE）──────────────────────────────────────────────────
+# 这是最终 SPGS 安全闸：weapons_hold 下任何武器命令都会被拒绝（即使已授权目标），
+# 这也是默认值（失效安全）。要真正开火必须显式抬高到：
+#   weapons_tight = 需人工确认目标（配合下面 authorized_target 规则，授权后自动闭环开火）
+#   weapons_free  = 自主开火，无需逐目标确认
+# 注意：仅修改本项 + 下面 intervention 规则即可让"授权→开火"闭环；保持 hold 则永不开火。
+weapon_release_authority = "weapons_tight"
+
+[platform.adapters.primary]
+type = "arksim"                           # "arksim" | "dds"
+host = "127.0.0.1"
+port = 18000                              # Warlock 直连 ZMQ PAIR（warlock_direct 模式）
+# 手动 Warlock：Play 想定后 OpenFang 直连 18000，无需 ArkService start、无需 uuid
+arksim_transport = "warlock_direct"
+# --- 以下为 ArkService 60004 路径（OpenFang 代管 start/attach）---
+# arksim_transport = "ark_service"
+# arksim_service_port = 60004
+# scenario_path = "E:/dev/ArkSIM_SCEN/ArkSIMModels/scenarios/usv_loiter_strike/usv_loiter_strike.txt"
+# arksim_uuid = "<仅 ark_service attach 时需要>"
+# 稳定组件树 manifest：只描述平台/传感器/武器/通信/机动部件真实名。
+# 不要在这里配置 track id；track 会随仿真时序变化，必须从实时 StateMessage 动态解析。
+component_manifest_path = "E:/dev/openfang/tactical-assets/config/arksim.usv_loiter_strike.components.toml"
+situation_interval_secs = 1.0
+step_timeout_secs = 30
+agent_tick_timeout_secs = 8               # NFR-R04: LLM 战术推理 < 8s
+
+[platform.intervention]
+default_mode = "roe_driven"               # Preserve ROE behavior unless a rule matches.
+
+# platform_ids 留空 = 匹配所有受控实体（按实体真实名/own_platform_id 字面量匹配；
+# 填具体 id 时必须与态势里的实体名一致，否则规则不命中→落回 default_mode）。
+# sources 含 "workflow"：慢环开火意图来源是 workflow（PlaybookScheduler 生成）。
+[[platform.intervention.rules]]
+stage = ["target_authorization", "weapon_release"]
+platform_ids = []
+command_classes = ["weapon"]
+sources = ["llm", "workflow"]
+mode = "authorized_target"                # Human confirms target once; later strikes auto-close.
+quorum = 1
+window_s = 30.0
+
+# ─────────────────────────────────────────────
+# Slow cognitive loop + planning LLM (optional)
+# ─────────────────────────────────────────────
+[platform.planning]
+enabled = true                            # Enable cognition → plan → task → playbook slow loop
+interval_secs = 10.0                       # Periodic re-plan cadence (hybrid with intent events)
+label_resolve = true                       # Resolve semantic priority_labels against current tracks
+label_resolution_mode = "confirm"          # confirm (operator review) or auto_gate (still uses backend gates)
+llm_refine = true                         # LLM re-prioritizes among rule-validated targets only
+# dsl_compile = true                       # Enable natural-language → Mission DSL compilation
+# dsl_llm_extract = true                   # Allow LLM fallback for free-form intents
+# dsl_doctrine_inject = false              # Prefix the intent extractor with mc/promt.md doctrine.
+                                           #   The strict ArkSIM-aligned JSON contract is always
+                                           #   appended last and overrides any conflict. Off by
+                                           #   default: the bundled doctrine is large and may hurt
+                                           #   JSON compliance on small local models — enable when
+                                           #   you want the mc doctrine to steer DSL compilation.
+# LLM endpoint/model inherit [default_model] unless you need a separate planning backend:
+# llm_provider = "custom"
+# llm_model = "qwen3.7-plus"
+# llm_base_url = "https://example.com/v1"
+# llm_api_key = ""
+llm_timeout_secs = 30
+
+# Test intent injection (after daemon start):
+#   POST http://127.0.0.1:4200/api/platform/intent
+#   Body (JSON):
+#   {
+#     "id": "intent-001",
+#     "issued_at": 0.0,
+#     "issued_by": "operator",
+#     "objective": "优先打击 trk-1",
+#     "priority_tracks": ["trk-1"],
+#     "constraints": [],
+#     "roe_pref": null
+#   }
+# Pending queue: GET /api/platform/pending
+
+# ─────────────────────────────────────────────
+# 大脑工作流编排（慢环用 WorkflowEngine 驱动多智能体）
+# ─────────────────────────────────────────────
+[platform.workflows]
+enabled = false                           # 启用后慢环改用工作流编排（默认关，走旧单管线）
+# definitions_path = "agents/workflows/tactical_workflows.toml"  # 相对 agents 目录可省略
+
+# 每个触发器：workflow=工作流名；scope=own(本机)|formation(仅 lead)；
+# trigger=periodic|event|command；event/command 二选一，periodic 用 interval_secs。
+[[platform.workflows.triggers]]
+workflow = "Patrol"
+scope = "own"
+trigger = "periodic"
+interval_secs = 30.0
+
+[[platform.workflows.triggers]]
+workflow = "Track"
+scope = "own"
+trigger = "event"
+event = "NewContact"
+
+[[platform.workflows.triggers]]
+workflow = "ElectronicAttack"
+scope = "own"                             # 本机有干扰吊舱时；编队时改 "formation"
+trigger = "event"
+event = "ThreatEmitter"
+
+[[platform.workflows.triggers]]
+workflow = "SEAD"
+scope = "formation"                       # 仅 fleet_role="lead" 激活
+trigger = "command"
+command = "sead"
+
+# ── 指挥官层面任务模板（standalone / own-scope）──────────────────────────
+# 自防御、使能、警戒、护航、拦截、欺骗六类，补全 ISR-打击进攻闭环之外的任务谱系。
+
+# 近程硬杀伤自卫 / 反小艇蜂群：来袭威胁事件触发，机炮末端拦截。
+[[platform.workflows.triggers]]
+workflow = "PointDefense"
+scope = "own"
+trigger = "event"
+event = "InboundThreat"
+
+# 超视距目标指示 / 中继制导：高价值接触触发，侦察 UAV 为射手提供火控级目标。
+[[platform.workflows.triggers]]
+workflow = "TargetingHandoff"
+scope = "own"
+trigger = "event"
+event = "HighValueContact"
+
+# 前出哨戒 / 警戒幕：周期性占领阵位，被动监视提供预警纵深。
+[[platform.workflows.triggers]]
+workflow = "Picket"
+scope = "own"
+trigger = "periodic"
+interval_secs = 30.0
+
+# 护航 / 伴随掩护：指令触发，跟随高价值单元提供反小目标掩护。
+[[platform.workflows.triggers]]
+workflow = "Escort"
+scope = "own"
+trigger = "command"
+command = "escort"
+
+# 海上拦截 / 抵近查证：指令触发，识别-警告-拦阻（非动能优先）。
+[[platform.workflows.triggers]]
+workflow = "MaritimeInterdiction"
+scope = "own"
+trigger = "command"
+command = "interdict"
+
+# 佯动 / 欺骗：指令触发，制造假目标信号牵制对手。
+[[platform.workflows.triggers]]
+workflow = "Deception"
+scope = "own"
+trigger = "command"
+command = "feint"
+
+# ─────────────────────────────────────────────
+# Uncomment for DDS hardware deployment:
+# ─────────────────────────────────────────────
+# [platform]
+# mode = "hardware"
+#
+# [platform.adapters.primary]
+# type = "dds"
+# domain_id = 0
+
+# ─────────────────────────────────────────────
+# Uncomment for hybrid mode (sim + HIL):
+# ─────────────────────────────────────────────
+# [platform]
+# mode = "hybrid"
+#
+# [platform.adapters.sim_vessel]
+# type = "arksim"
+# platforms = ["usv-01", "usv-02"]
+#
+# [platform.adapters.hw_vessel]
+# type = "dds"
+# platforms = ["usv-03"]
+
+# ─────────────────────────────────────────────
+# Direct Command Channel — fast reflex rules
+# ─────────────────────────────────────────────
+[[direct_command_rules]]
+name = "auto_chaff_on_radar_lock"
+condition = { type = "RadarLock", min_track_quality = 0.7, max_range_m = 8000 }
+action = { type = "FireChaff", count = 3, interval_s = 0.5 }
+priority = "Critical"
+cooldown_ms = 5000
+max_fires_per_minute = 6
+
+[[direct_command_rules]]
+name = "collision_avoidance"
+condition = { type = "CollisionRisk", min_cpa_m = 200, max_tcpa_s = 60 }
+action = { type = "SetHeading", heading_delta_deg = 90, speed_ms = "max" }
+priority = "Critical"
+cooldown_ms = 2000
+max_fires_per_minute = 30
+
+[[direct_command_rules]]
+name = "auto_jam_on_threat_radar"
+condition = { type = "RadarLock", min_track_quality = 0.5, max_range_m = 20000, track_affiliation = "Hostile" }
+action = { type = "JamStart", bandwidth_hz = "wide" }
+priority = "High"
+cooldown_ms = 10000
+
+[[direct_command_rules]]
+name = "shore_weapon_approval_forward"
+condition = { type = "ExternalCommand", command_type = "ApprovalResponse", requires_hmac = true }
+action = { type = "WeaponArmAcknowledge" }
+priority = "Critical"
+cooldown_ms = 0
+
+[[direct_command_rules]]
+name = "shore_self_destruct_forward"
+condition = { type = "ExternalCommand", command_type = "SelfDestruct", requires_hmac = true }
+action = { type = "SelfDestructExecute" }
+priority = "Critical"
+cooldown_ms = 0
+
+# ── UAV-specific DCC rules ──
+# [[direct_command_rules]]
+# name = "auto_rtb_on_low_fuel"
+# condition = { type = "UavFuelCritical", min_reserve_pct = 0.12 }
+# action = { type = "ReturnToBase", urgency = "Emergency" }
+# priority = "Critical"
+# cooldown_ms = 0
+
+# [[direct_command_rules]]
+# name = "auto_abort_on_comm_loss"
+# condition = { type = "UavCommLost", timeout_s = 30 }
+# action = { type = "ReturnToBase", urgency = "Emergency" }
+# priority = "Critical"
+# cooldown_ms = 0
+
+# ── Operational Restrictions (Geofence / ROE) ──
+# [[direct_command_rules]]
+# name = "auto_hold_on_geofence_violation"
+# condition = { type = "GeofenceViolation", violation = "KeepOut" }
+# action = { type = "SetSpeed", speed_ms = 0 }
+# priority = "Critical"
+# cooldown_ms = 1000
+
+# [[direct_command_rules]]
+# name = "auto_abort_on_roe_change_to_hold"
+# condition = { type = "ROEChange", new_level = "WeaponsHold" }
+# action = { type = "WeaponSafeAll" }
+# priority = "Critical"
+# cooldown_ms = 0
+
+# ─────────────────────────────────────────────
+# Operational Restrictions
+# ─────────────────────────────────────────────
+# [operational_restrictions]
+# weapon_release_authority = "WeaponsTight"   # Hold | Tight | Free
+#
+# [[operational_restrictions.geofences]]
+# name = "patrol_zone"
+# boundary = [[30.0, 120.0], [30.5, 120.0], [30.5, 120.5], [30.0, 120.5]]
+# restriction = "KeepIn"
+# violation_action = "AutoCorrect"
+#
+# [[operational_restrictions.geofences]]
+# name = "no_go_zone"
+# boundary = [[31.0, 121.0], [31.2, 121.0], [31.2, 121.2], [31.0, 121.2]]
+# restriction = "KeepOut"
+# violation_action = "AbortMission"
+
+# ─────────────────────────────────────────────
+# Weapon Approval — quorum-based
+# ─────────────────────────────────────────────
+[approval]
+require_approval = ["weapon_arm", "weapon_launch", "self_destruct"]
+timeout_secs = 300                          # 5 min for weapon decisions
+auto_approve_autonomous = false             # Default: require shore approval
+
+# ─────────────────────────────────────────────
+# Communication Monitor
+# ─────────────────────────────────────────────
+# [comm_monitor]
+# ping_interval_secs = 30
+# failure_threshold = 5                      # 5 consecutive failures → LinkLost
+# peer_ids = ["shore_command", "hec"]
+
+# ─────────────────────────────────────────────
+# OFP P2P Network
+# ─────────────────────────────────────────────
+[network]
+listen_addr = "0.0.0.0:4200"
+shared_secret = ""                          # Required: set HMAC shared secret
+
+# ─────────────────────────────────────────────
+# Mission Config
+# ─────────────────────────────────────────────
+# [[mission_configs]]
+# mission_id = "patrol_alpha"
+# roe = { weapon_release_authority = "WeaponsTight" }
+# geofences = ["patrol_zone", "no_go_zone"]
+#
+# [[mission_configs.contingency_plans]]
+# name = "comms_lost"
+# trigger = "CommLost"
+# actions = [
+#     { type = "SwitchAutonomyMode", mode = "L5_FullyAutonomous" },
+#     { type = "DCC_RuleEnable", rule = "auto_rtb_on_low_fuel" },
+# ]
+
+# ─────────────────────────────────────────────
+# Memory / Persistence
+# ─────────────────────────────────────────────
+[memory]
+decay_rate = 0.05
+sqlite_path = "~/.openfang/data/openfang.db"
+
+# ─────────────────────────────────────────────
+# API Server — local debug only
+# ─────────────────────────────────────────────
+# api_listen = "127.0.0.1:4201"

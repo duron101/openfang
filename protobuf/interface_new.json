@@ -1,0 +1,31 @@
+#控制指令
+#启动一个实例
+{"args":{"exec":1,"offscreen":false,"randomSeed":0,"realtime":false,"scenarios":["D:/ArkSIM3.1.6/demo/floridistan/floridistan.txt"],"simType":0},"fn":"start"}
+#继续uuid换成arkservice回传的uuid
+{"fn":"resume","uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+#暂停
+{"fn":"pause","uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+#停止
+{"fn":"stop","uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+#重推
+{"fn":"restart","uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+#步进
+{"fn":"runstep","args":{"step":1},"uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+#快进到某一时刻
+{"fn":"advance_to_time","args":{"time":1.0},"uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+#倍速
+{"fn":"set_clock_rate","args":{"rate":1.0},"uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+#实体控制
+{"fn":"proto","proto":"字符串","uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+#字符串：用ArkSimActionProto.proto文件中ActionsFromOutside赋值后进行转换。
+#态势类数据详见zmq_observer.ag中说明
+
+#2024年11月1日添加接口
+#默认态势：定制态势 rate=0（arksimproto.proto / JSON customizedsituation）— OpenFang 默认
+#实时态势 rate=1（zmq_observer_pb3.proto）— 不使用
+#切换态势类型：0为定制态势，对应arksimproto.proto文件中结构；1为实时变化战场态势，对应zmq_observer_pb3.proto文件中结构
+{"fn":"changesituation","rate":0,"uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+#开关仿真时间输出（默认开启）？？输出格式是什么？
+{"fn":"simulationtimeswitch","rate":false,"uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+#设置定制态势输出时间间隔（默认3秒）
+{"fn":"customizedsituation","time":3.0,"uuid":"d7ef233bb7d3489c911dc95d89f8df22"}

@@ -5,11 +5,33 @@
 # api_key = ""                               # Set to enable Bearer auth (recommended)
 # api_listen = "127.0.0.1:50051"             # HTTP API bind address (use 0.0.0.0 for public)
 
-[default_model]
-provider = "anthropic"                    # "anthropic", "gemini", "openai", "groq", "ollama", etc.
-model = "claude-sonnet-4-20250514"        # Model identifier
-api_key_env = "ANTHROPIC_API_KEY"         # Environment variable holding API key
+# ── Cloud / remote providers (commented — restore when not using local llama.cpp) ──
+#[default_model]
+#provider = "anthropic"                    # "anthropic", "gemini", "openai", "groq", "ollama", etc.
+#model = "claude-sonnet-4-20250514"        # Model identifier
+#api_key_env = "ANTHROPIC_API_KEY"         # Environment variable holding API key
 # base_url = "https://api.anthropic.com"  # Optional: override API endpoint
+
+# ── llama.cpp local GGUF inference (managed subprocess at boot) ──
+[llamacpp]
+enabled = true
+model_path = "D:/models/your-model.gguf"    # Path to GGUF weights
+# binary_path = "E:/dev/openfang/public/llamaCPP/llama-server.exe"
+host = "127.0.0.1"
+port = 8080
+# ctx_size = 8192
+# threads = 8
+# n_gpu_layers = 99                             # Vulkan GPU offload (plan B)
+# extra_args = ["--fit", "off"]                 # disable auto-fit on AMD iGPU
+# OpenFang sets GGML_VK_DISABLE_COOPMAT=1 when spawning llama-server
+# external = false                          # true = assume server already running (manual start)
+# startup_timeout_secs = 600
+
+[default_model]
+provider = "llamacpp"
+model = "your-model"                        # Usually GGUF filename stem; auto-filled if empty
+api_key_env = ""
+# base_url auto-wired from [llamacpp] when omitted
 
 [memory]
 decay_rate = 0.05                         # Memory confidence decay rate

@@ -74,22 +74,6 @@ pub struct SetModeRequest {
     pub mode: openfang_types::agent::AgentMode,
 }
 
-/// Request to run a migration.
-#[derive(Debug, Deserialize)]
-pub struct MigrateRequest {
-    pub source: String,
-    pub source_dir: String,
-    pub target_dir: String,
-    #[serde(default)]
-    pub dry_run: bool,
-}
-
-/// Request to scan a directory for migration.
-#[derive(Debug, Deserialize)]
-pub struct MigrateScanRequest {
-    pub path: String,
-}
-
 /// Request to install a skill from ClawHub.
 #[derive(Debug, Deserialize)]
 pub struct ClawHubInstallRequest {

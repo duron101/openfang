@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ArkService 接口文档</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --card-bg: #ffffff;
+    --text: #2c3e50;
+    --text-secondary: #5a6a7a;
+    --border: #e2e6ea;
+    --accent: #2563eb;
+    --accent-light: #eff6ff;
+    --code-bg: #f1f5f9;
+    --table-header: #f8fafc;
+    --table-stripe: #fafbfc;
+    --pill-json: #dbeafe;
+    --pill-proto: #fef3c7;
+    --pill-json-text: #1d4ed8;
+    --pill-proto-text: #92400e;
+    --note-bg: #fffbeb;
+    --note-border: #fcd34d;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 40px 20px;
+  }
+
+  .container {
+    max-width: 1000px;
+    margin: 0 auto;
+    background: var(--card-bg);
+    border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.04);
+    padding: 48px 56px 64px;
+  }
+
+  h1 {
+    font-size: 2rem;
+    color: #1e293b;
+    border-bottom: 2px solid var(--border);
+    padding-bottom: 16px;
+    margin-bottom: 16px;
+  }
+
+  h2 {
+    font-size: 1.45rem;
+    color: #1e293b;
+    margin-top: 44px;
+    margin-bottom: 14px;
+    padding-left: 12px;
+    border-left: 4px solid var(--accent);
+  }
+
+  h3 {
+    font-size: 1.15rem;
+    color: #334155;
+    margin-top: 32px;
+    margin-bottom: 10px;
+  }
+
+  h4 {
+    font-size: 1.0rem;
+    color: #475569;
+    margin-top: 24px;
+    margin-bottom: 8px;
+  }
+
+  p { margin-bottom: 12px; color: var(--text-secondary); }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0 20px;
+    font-size: 0.92rem;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  th {
+    background: var(--table-header);
+    font-weight: 600;
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+  }
+  td {
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  tr:nth-child(even) td { background: var(--table-stripe); }
+
+  .tag {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .tag-json { background: var(--pill-json); color: var(--pill-json-text); }
+  .tag-proto { background: var(--pill-proto); color: var(--pill-proto-text); }
+
+  .cmd-name {
+    font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+    color: #334155;
+    font-weight: 600;
+  }
+
+  pre {
+    background: #1e293b;
+    color: #e2e8f0;
+    padding: 16px 20px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    overflow-x: auto;
+    margin: 10px 0 18px;
+    line-height: 1.55;
+  }
+
+  code {
+    font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    padding: 1px 6px;
+    border-radius: 4px;
+    color: var(--text);
+  }
+
+  .note {
+    background: var(--note-bg);
+    border: 1px solid var(--note-border);
+    border-radius: 8px;
+    padding: 10px 16px;
+    margin: 12px 0;
+    font-size: 0.88rem;
+    color: #92400e;
+  }
+
+  .toc {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 24px;
+    margin-bottom: 32px;
+    font-size: 0.9rem;
+  }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .toc ol { padding-left: 22px; }
+
+  .back-top {
+    display: block;
+    text-align: right;
+    font-size: 0.84rem;
+    margin-top: 40px;
+  }
+  .back-top a { color: var(--accent); text-decoration: none; }
+
+  @media (max-width: 768px) {
+    .container { padding: 28px 20px 40px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>ArkService 接口文档</h1>
+
+<p style="font-size:0.84rem;color:#64748b;margin-bottom:24px;">
+  参考源文件：
+  <code>interface_new.json</code> &nbsp;
+  <code>arksimActions.proto</code> &nbsp;
+  <code>arksimproto.proto</code>
+</p>
+
+<div class="toc">
+  <strong>目录</strong>
+  <ol>
+    <li><a href="#s1">仿真控制接口（JSON）</a></li>
+    <li><a href="#s2">态势切换与输出控制接口（JSON）</a></li>
+    <li><a href="#s3">实体控制接口（Protobuf）</a></li>
+    <li><a href="#s4">态势输出数据结构（Protobuf）</a></li>
+  </ol>
+</div>
+
+<p style="margin-bottom:28px;">ArkService 是 ArkSim 仿真引擎的外部控制接口，支持 JSON 和 Protobuf 两种协议格式。</p>
+
+<!-- ============ 一、仿真控制接口 ============ -->
+<h2 id="s1">一、仿真控制接口 <span class="tag tag-json">JSON</span></h2>
+
+<p>请求格式：<code>{"fn": "&lt;命令&gt;", ...}</code>，需要 <code>uuid</code> 的场景由 arkservice 回传。</p>
+
+<table>
+<tr><th>fn</th><th>参数</th><th>说明</th></tr>
+<tr>
+  <td class="cmd-name">start</td>
+  <td>
+    <code>args.exec</code>: int<br>
+    <code>args.offscreen</code>: bool<br>
+    <code>args.randomSeed</code>: int<br>
+    <code>args.realtime</code>: bool<br>
+    <code>args.scenarios</code>: string[]<br>
+    <code>args.simType</code>: int
+  </td>
+  <td>启动一个仿真实例</td>
+</tr>
+<tr><td class="cmd-name">resume</td><td><code>uuid</code>: string</td><td>继续仿真（uuid 换成 arkservice 回传的 uuid）</td></tr>
+<tr><td class="cmd-name">pause</td><td><code>uuid</code>: string</td><td>暂停仿真</td></tr>
+<tr><td class="cmd-name">stop</td><td><code>uuid</code>: string</td><td>停止仿真</td></tr>
+<tr><td class="cmd-name">restart</td><td><code>uuid</code>: string</td><td>重推仿真</td></tr>
+<tr><td class="cmd-name">runstep</td><td><code>args.step</code>: int, <code>uuid</code>: string</td><td>步进仿真</td></tr>
+<tr><td class="cmd-name">advance_to_time</td><td><code>args.time</code>: double, <code>uuid</code>: string</td><td>快进到某一时刻</td></tr>
+<tr><td class="cmd-name">set_clock_rate</td><td><code>args.rate</code>: double, <code>uuid</code>: string</td><td>设置仿真倍速</td></tr>
+<tr>
+  <td class="cmd-name">proto</td>
+  <td><code>proto</code>: string, <code>uuid</code>: string</td>
+  <td>实体控制指令。字符串由 <code>ArkSimActionProto.ActionsFromOutside</code> 消息赋值后进行序列化（详见 <a href="#s3">第三节</a>）。态势类数据详见 <code>zmq_observer.ag</code></td>
+</tr>
+</table>
+
+<h4>start 参数说明</h4>
+<table>
+<tr><th>参数</th><th>类型</th><th>说明</th></tr>
+<tr><td class="cmd-name">exec</td><td>int</td><td>执行模式（1=执行）</td></tr>
+<tr><td class="cmd-name">offscreen</td><td>bool</td><td>是否离屏渲染</td></tr>
+<tr><td class="cmd-name">randomSeed</td><td>int</td><td>随机种子（0=默认）</td></tr>
+<tr><td class="cmd-name">realtime</td><td>bool</td><td>是否实时模式</td></tr>
+<tr><td class="cmd-name">scenarios</td><td>string[]</td><td>场景文件路径列表</td></tr>
+<tr><td class="cmd-name">simType</td><td>int</td><td>仿真类型</td></tr>
+</table>
+
+<h4>示例</h4>
+<pre>// 启动仿真
+{"args":{"exec":1,"offscreen":false,"randomSeed":0,"realtime":false,
+ "scenarios":["D:/ArkSIM3.1.6/demo/floridistan/floridistan.txt"],"simType":0},"fn":"start"}
+
+// 继续
+{"fn":"resume","uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+
+// 暂停
+{"fn":"pause","uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+
+// 停止
+{"fn":"stop","uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+
+// 重推
+{"fn":"restart","uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+
+// 步进
+{"fn":"runstep","args":{"step":1},"uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+
+// 快进到某一时刻
+{"fn":"advance_to_time","args":{"time":1.0},"uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+
+// 倍速
+{"fn":"set_clock_rate","args":{"rate":1.0},"uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+
+// 实体控制
+{"fn":"proto","proto":"&lt;ActionsFromOutside序列化字符串&gt;","uuid":"d7ef233bb7d3489c911dc95d89f8df22"}</pre>
+
+<!-- ============ 二、态势切换与输出控制接口 ============ -->
+<h2 id="s2">二、态势切换与输出控制接口 <span class="tag tag-json">JSON</span></h2>
+
+<p>以下接口于 2024 年 11 月 1 日添加。请求格式：<code>{"fn": "&lt;命令&gt;", ..., "uuid": "&lt;uuid&gt;"}</code></p>
+
+<table>
+<tr><th>fn</th><th>参数</th><th>说明</th></tr>
+<tr>
+  <td class="cmd-name">changesituation</td>
+  <td><code>rate</code>: int (0 / 1)<br><code>uuid</code>: string</td>
+  <td>
+    切换态势类型：<br>
+    &bull; <code>0</code> — 定制态势，对应 <code>arksim_customized_situation.proto</code> 中结构<br>
+    &bull; <code>1</code> — 实时变化战场态势，对应 <code>zmq_observer_pb3.proto</code> 中结构
+  </td>
+</tr>
+<tr>
+  <td class="cmd-name">simulationtimeswitch</td>
+  <td><code>rate</code>: bool<br><code>uuid</code>: string</td>
+  <td>开关仿真时间输出（默认开启）</td>
+</tr>
+<tr>
+  <td class="cmd-name">customizedsituation</td>
+  <td><code>time</code>: double<br><code>uuid</code>: string</td>
+  <td>设置定制态势输出时间间隔（默认 3 秒）</td>
+</tr>
+</table>
+
+<h4>示例</h4>
+<pre>// 切换态势类型 — 定制态势
+{"fn":"changesituation","rate":0,"uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+
+// 开关仿真时间输出 — 关闭
+{"fn":"simulationtimeswitch","rate":false,"uuid":"d7ef233bb7d3489c911dc95d89f8df22"}
+
+// 设置定制态势输出时间间隔 — 3秒
+{"fn":"customizedsituation","time":3.0,"uuid":"d7ef233bb7d3489c911dc95d89f8df22"}</pre>
+
+<!-- ============ 三、实体控制接口 ============ -->
+<h2 id="s3">三、实体控制接口 <span class="tag tag-proto">Protobuf</span></h2>
+
+<p>定义文件：<code>arksimActions.proto</code>，package <code>ArkSimActionProto</code>。实体控制指令打包在 <code>ActionsFromOutside</code> 消息中，序列化后通过 <code>{"fn":"proto", "proto":"&lt;序列化字符串&gt;", ...}</code> 发送。</p>
+
+<h3>3.1 控制指令枚举 E_Actions</h3>
+
+<table>
+<tr><th>枚举值</th><th>编号</th><th>说明</th></tr>
+<tr><td class="cmd-name">E_SetAgentOutsideControl</td><td>0</td><td>设置可控制实体</td></tr>
+<tr><td class="cmd-name">E_ReleaseOutsideControl</td><td>1</td><td>取消可控制实体</td></tr>
+<tr><td class="cmd-name">E_SetDesiredVelocity</td><td>2</td><td>设置期望速度</td></tr>
+<tr><td class="cmd-name">E_SetDesiredAltitude</td><td>3</td><td>设置期望高度</td></tr>
+<tr><td class="cmd-name">E_SetDesiredHeading</td><td>4</td><td>设置期望朝向</td></tr>
+<tr><td class="cmd-name">E_GoToLocation</td><td>5</td><td>改变位置</td></tr>
+<tr><td class="cmd-name">E_FollowRoute</td><td>6</td><td>设置跟随路线</td></tr>
+<tr><td class="cmd-name">E_AuxActions</td><td>7</td><td>AUX 指令（透传至脚本处理）</td></tr>
+<tr><td class="cmd-name">E_TurnOnSensor</td><td>8</td><td>打开传感器</td></tr>
+<tr><td class="cmd-name">E_TurnOffSensor</td><td>9</td><td>关闭传感器</td></tr>
+<tr><td class="cmd-name">E_ChangeSensorMode</td><td>10</td><td>改变传感器工作模式</td></tr>
+<tr><td class="cmd-name">E_GetSensorCurrentMode</td><td>11</td><td>获取传感器工作模式</td></tr>
+<tr><td class="cmd-name">E_FireAtTarget</td><td>12</td><td>开火</td></tr>
+<tr><td class="cmd-name">E_FireSlavoAtTarget</td><td>13</td><td>用特定武器向目标齐射</td></tr>
+<tr><td class="cmd-name">E_UpdateTarget</td><td>14</td><td>更新当前目标</td></tr>
+<tr><td class="cmd-name">E_StartJamming</td><td>15</td><td>开干扰</td></tr>
+<tr><td class="cmd-name">E_StopJamming</td><td>16</td><td>关干扰</td></tr>
+<tr><td class="cmd-name">E_ChangeJammingMode</td><td>17</td><td>改变干扰工作模式</td></tr>
+<tr><td class="cmd-name">E_TurnOnComm</td><td>18</td><td>通信开机</td></tr>
+<tr><td class="cmd-name">E_TurnOffComm</td><td>19</td><td>通信关机</td></tr>
+<tr><td class="cmd-name">E_SendMsgToPlatform</td><td>20</td><td>向特定平台发送消息</td></tr>
+<tr><td class="cmd-name">E_SendMsgToCommandChain</td><td>21</td><td>向特定指挥链发送消息</td></tr>
+<tr><td class="cmd-name">E_ChangePlatformNumber</td><td>22</td><td>修改仿真实体数量（增加实体和删除实体）</td></tr>
+<tr><td class="cmd-name">E_ChangeCommander</td><td>23</td><td>更换实体的指挥链上级</td></tr>
+</table>
+
+<h3>3.2 顶层消息 ActionsFromOutside</h3>
+<pre>message ActionsFromOutside {
+    repeated AgentContrl            a_agentcontrl        = 1;
+    repeated DesiredHeading         a_desiredheading      = 2;
+    repeated DesiredAltitude        a_desiredaltitude     = 3;
+    repeated DesiredVelocity        a_desiredvelocity     = 4;
+    repeated GoToLocation           a_gotolocation        = 5;
+    repeated FollowRoute            a_followroute         = 6;
+    repeated SensorAction           a_sensoraction        = 7;
+    repeated ChangeSensorMode       a_changesensormode    = 8;
+    repeated FireAtTarget           a_fireattarget        = 9;
+    repeated FireSlavoAtTarget      a_fireslavoattarget   = 10;
+    repeated ChangeJammingMode      a_changejammingmode   = 11;
+    repeated SendMsgToPlatform      a_sendmsgtoplatform   = 12;
+    repeated SendMsgToCommandChain  a_sendmsgtocommandchain = 13;
+    repeated AfsimAuxCommand        a_afsimauxcommand     = 14;
+    repeated ChangeCommander        a_ChangeCommander     = 15;
+    repeated ChangePlatformNumber   a_ChangePlatformNumber = 16;
+}</pre>
+
+<h3>3.3 基础消息类型</h3>
+
+<h4>AgentName</h4>
+<pre>message AgentName {
+    string agent_id     = 1; // 目标实体的名字
+    string Component_id = 2; // 目标携带传感器、通信组件、武器的名字（仅控制实体时为空）
+}</pre>
+
+<h3>3.4 运动控制</h3>
+
+<h4>DesiredHeading（指令 4）</h4>
+<pre>message DesiredHeading {
+    string agent_id                = 1; // 目标实体名字
+    double desired_heading         = 2; // 要求 platform 转向的 heading（radians），顺时针为正，北=0
+    bool   has_desired_velocity    = 3; // 转弯时使用的速度 是否指定（可选）
+    double desired_velocity        = 4; // 期望转弯速度（m/s）
+    bool   has_desired_turn_direction = 5; // 转向方向 是否指定（可选，不指定则仿真采用最短路径）
+    uint32 desired_turn_direction  = 6; // 0=左，1=右
+}</pre>
+
+<h4>DesiredAltitude（指令 3）</h4>
+<pre>message DesiredAltitude {
+    string agent_id                = 1; // 目标实体名字
+    double desired_altitude        = 2; // 期望高度（m）
+    bool   has_desired_altitude_rate = 3; // 上升/下降速率 是否指定（可选）
+    double desired_altitude_rate   = 4; // 期望高度变化速率（m/s，如果指定总是正值）
+}</pre>
+
+<h4>DesiredVelocity（指令 2）</h4>
+<pre>message DesiredVelocity {
+    string agent_id         = 1; // 目标实体名字
+    double desired_velocity = 2; // 期望速度
+    double linearAccel      = 3; // 线性加速度
+}</pre>
+
+<h4>GoToLocation（指令 5）</h4>
+<pre>message GoToLocation {
+    string          agent_id            = 1; // 目标实体名字
+    uint32          priority            = 2; // 优先级
+    repeated double reportedLocationLLA = 3; // 目标位置 LLA [纬度, 经度, 高度]
+}</pre>
+
+<h4>FollowRoute（指令 6）</h4>
+<pre>message Waypoint {
+    string          WaypointID          = 1;
+    double          speed               = 2;
+    repeated double reportedLocationLLA = 3; // [纬度, 经度, 高度]
+}
+
+message FollowRoute {
+    string             agent_id       = 1; // 目标实体名字
+    string             aRouteName     = 2; // 路线名称
+    repeated Waypoint  repeatedpoint  = 3; // 路径点集合
+}</pre>
+
+<h4>AgentContrl（指令 0, 1）</h4>
+<pre>message AgentContrl {
+    E_Actions action   = 1; // E_SetAgentOutsideControl / E_ReleaseOutsideControl
+    string    agent_id = 2; // 目标实体名字
+}</pre>
+
+<h3>3.5 传感器控制</h3>
+
+<h4>SensorAction（指令 8, 9, 11, 14, 16, 18, 19）</h4>
+<pre>message SensorAction {
+    E_Actions action = 1; // 指令类型
+    AgentName agent  = 2;
+}</pre>
+
+<h4>ChangeSensorMode（指令 10）</h4>
+<pre>message ChangeSensorMode {
+    AgentName agent = 1;
+    string    mode  = 2;
+}</pre>
+
+<h3>3.6 武器控制</h3>
+
+<h4>FireAtTarget（指令 12, 15）</h4>
+<pre>message FireAtTarget {
+    E_Actions action  = 1; // FireAtTarget / StartJamming
+    AgentName agent   = 2;
+    string    trck_id = 3;
+}</pre>
+
+<h4>FireSlavoAtTarget（指令 13）</h4>
+<pre>message FireSlavoAtTarget {
+    AgentName agent      = 1;
+    string    trck_id    = 2;
+    uint32    slavo_size = 3;
+}</pre>
+
+<h3>3.7 干扰控制</h3>
+
+<h4>ChangeJammingMode（指令 17）</h4>
+<pre>message JammingModeStruct {
+    double aFrequency  = 1;
+    double aBandwidth  = 2;
+    uint32 aBeamNumber = 3;
+}
+
+message ChangeJammingMode {
+    AgentName         agent = 1;
+    JammingModeStruct mode  = 2;
+}</pre>
+
+<h3>3.8 通信控制</h3>
+
+<h4>SendMsgToPlatform（指令 20）</h4>
+<pre>message SendMsgToPlatform {
+    AgentName agent     = 1;
+    string    target_id = 2;
+    string    message   = 3;
+}</pre>
+
+<h4>SendMsgToCommandChain（指令 21）</h4>
+<pre>message SendMsgToCommandChain {
+    AgentName agent     = 1;
+    string    target_id = 2;
+    uint32    mode      = 3;
+    string    message   = 4;
+}</pre>
+
+<h3>3.9 AUX 数据</h3>
+
+<h4>AfsimAuxCommand（指令 7）</h4>
+<pre>message AfsimAuxCommand {
+    repeated PlatformAuxData platformAux = 1;
+}
+
+message PlatformAuxData {
+    string name  = 2; // 目标平台名字
+    uint32 index = 3;
+    repeated AuxData auxdata = 1; // AUX 数据
+}
+
+message AuxData {
+    string key  = 1;
+    uint32 type = 3; // 0=STRING, 1=DOUBLE, 2=BOOL, 3=DICT
+
+    string stringValue       = 2; // type=0 时使用
+    double doubleValue       = 4; // type=1 时使用
+    bool   boolValue         = 5; // type=2 时使用
+    repeated AuxData dictValue = 6; // type=3 时使用（嵌套字典）
+}</pre>
+
+<h3>3.10 编制与部署</h3>
+
+<h4>ChangeCommander（指令 23）</h4>
+<pre>message ChangeCommander {
+    string name      = 1; // 实体名字
+    string commander = 2; // 新的指挥官名字
+}</pre>
+
+<h4>ChangePlatformNumber（指令 22）</h4>
+<pre>message ChangePlatformNumber {
+    string name      = 1; // 实体名字
+    bool   ordertype = 2; // true=增加, false=删除
+    string type      = 3; // 实体类型
+    string side      = 4; // 阵营
+    double lon       = 5; // 经度
+    double lat       = 6; // 纬度
+    double alt       = 7; // 高度
+    double direction = 8; // 朝向
+    double speed     = 9; // 速度
+}</pre>
+
+<!-- ============ 四、态势输出数据结构 ============ -->
+<h2 id="s4">四、态势输出数据结构 <span class="tag tag-proto">Protobuf</span></h2>
+
+<p>定义文件：<code>arksimproto.proto</code>，package <code>ArkSIMCustomizedSituation</code>。切换态势类型使用 <code>changesituation</code> 接口（见 <a href="#s2">第二节</a>）：0 对应本文件结构，1 对应 <code>zmq_observer_pb3.proto</code>。</p>
+
+<h3>4.1 顶层消息 StateMessage</h3>
+<pre>message StateMessage {
+    repeated PlatformState     platforms = 1;
+    repeated ActiveWeaponState Weapons   = 2;
+    double time    = 3;
+    double endTime = 4;
+}</pre>
+
+<h3>4.2 PlatformState — 平台状态</h3>
+
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th></tr>
+<tr><td class="cmd-name">locationLLA</td><td>repeated double</td><td>[纬度, 经度, 高度]</td></tr>
+<tr><td class="cmd-name">locationWCS</td><td>repeated double</td><td>世界坐标系位置</td></tr>
+<tr><td class="cmd-name">velocityNED</td><td>repeated double</td><td>NED 速度</td></tr>
+<tr><td class="cmd-name">velocityECS</td><td>repeated double</td><td>机体速度（body velocity）</td></tr>
+<tr><td class="cmd-name">orientationNED</td><td>repeated double</td><td>[heading, pitch, roll] ALL RADIANS</td></tr>
+<tr><td class="cmd-name">accelerationNED</td><td>repeated double</td><td>NED 加速度</td></tr>
+<tr><td class="cmd-name">accelerationWCS</td><td>repeated double</td><td>世界坐标系加速度</td></tr>
+<tr><td class="cmd-name">name</td><td>string</td><td>实体名称</td></tr>
+<tr><td class="cmd-name">type</td><td>string</td><td>实体类型</td></tr>
+<tr><td class="cmd-name">side</td><td>string</td><td>阵营</td></tr>
+<tr><td class="cmd-name">index</td><td>uint32</td><td>索引</td></tr>
+<tr><td class="cmd-name">tracks</td><td>repeated TrackState</td><td>航迹列表</td></tr>
+<tr><td class="cmd-name">fuelAvailable</td><td>bool</td><td>是否有燃料数据</td></tr>
+<tr><td class="cmd-name">fuel</td><td>double</td><td>当前燃料</td></tr>
+<tr><td class="cmd-name">maxFuel</td><td>double</td><td>最大燃料</td></tr>
+<tr><td class="cmd-name">fuelConsumptionRate</td><td>double</td><td>燃料消耗率</td></tr>
+<tr><td class="cmd-name">auxdata</td><td>repeated AuxData</td><td>自定义数据</td></tr>
+<tr><td class="cmd-name">damageFactor</td><td>double</td><td>损伤系数</td></tr>
+<tr><td class="cmd-name">weapons</td><td>map&lt;string, WeaponState&gt;</td><td>武器状态</td></tr>
+<tr><td class="cmd-name">assets</td><td>repeated string</td><td>资产列表</td></tr>
+<tr><td class="cmd-name">uniqueId</td><td>uint32</td><td>唯一 ID</td></tr>
+<tr><td class="cmd-name">creationTime</td><td>double</td><td>创建时间</td></tr>
+<tr><td class="cmd-name">hasCurrentTarget</td><td>bool</td><td>是否有当前目标</td></tr>
+<tr><td class="cmd-name">currentTarget</td><td>string</td><td>当前目标</td></tr>
+<tr><td class="cmd-name">spatialDomain</td><td>string</td><td>空间域（land / air / surface / subsurface / space / unknown）</td></tr>
+<tr><td class="cmd-name">category</td><td>string</td><td>类别</td></tr>
+<tr><td class="cmd-name">commander</td><td>string</td><td>指挥官</td></tr>
+</table>
+
+<h4>Protobuf 定义</h4>
+<pre>message PlatformState {
+    repeated double locationLLA      = 1;
+    repeated double locationWCS      = 2;
+    repeated double velocityNED      = 3;
+    repeated double velocityECS      = 4;  // body velocity
+    repeated double orientationNED   = 5;  // [heading,pitch,roll] ALL RADIANS
+    repeated double accelerationNED  = 6;
+    repeated double accelerationWCS  = 7;
+    string          name             = 8;
+    string          type             = 9;
+    string          side             = 10;
+    uint32          index            = 11;
+    repeated TrackState tracks       = 12;
+    bool            fuelAvailable    = 13;
+    double          fuel             = 14;
+    double          maxFuel          = 16;
+    double          fuelConsumptionRate = 22;
+    repeated AuxData auxdata         = 17;
+    double          damageFactor     = 18;
+    map&lt;string, WeaponState&gt; weapons = 19;
+    repeated string assets           = 20;
+    uint32          uniqueId         = 21;
+    double          creationTime     = 23;
+    bool            hasCurrentTarget = 24;
+    string          currentTarget    = 25;
+    string          spatialDomain    = 26; // land, air, surface, subsurface, space, unknown
+    string          category         = 27;
+    string          commander        = 28;
+}</pre>
+
+<h3>4.3 TrackState — 航迹状态</h3>
+
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th></tr>
+<tr><td class="cmd-name">localTrackNumber</td><td>int32</td><td>已废弃，请使用 trackId</td></tr>
+<tr><td class="cmd-name">startTime</td><td>double</td><td>航迹开始时间</td></tr>
+<tr><td class="cmd-name">timeSinceStarted</td><td>double</td><td>经过时间</td></tr>
+<tr><td class="cmd-name">updateTime</td><td>double</td><td>更新时间</td></tr>
+<tr><td class="cmd-name">updateCount</td><td>double</td><td>更新次数</td></tr>
+<tr><td class="cmd-name">timeSinceUpdated</td><td>double</td><td>距上次更新时间</td></tr>
+<tr><td class="cmd-name">typeValid</td><td>bool</td><td>类型是否有效</td></tr>
+<tr><td class="cmd-name">type</td><td>string</td><td>类型值</td></tr>
+<tr><td class="cmd-name">sideValid</td><td>bool</td><td>阵营是否有效</td></tr>
+<tr><td class="cmd-name">side</td><td>string</td><td>阵营值</td></tr>
+<tr><td class="cmd-name">locationValid</td><td>bool</td><td>位置是否有效</td></tr>
+<tr><td class="cmd-name">reportedLocationLLA</td><td>repeated double</td><td>报告位置 LLA</td></tr>
+<tr><td class="cmd-name">reportedLocationWCS</td><td>repeated double</td><td>报告位置 WCS</td></tr>
+<tr><td class="cmd-name">currentLocationLLA</td><td>repeated double</td><td>当前位置 LLA</td></tr>
+<tr><td class="cmd-name">currentLocationWCS</td><td>repeated double</td><td>当前位置 WCS</td></tr>
+<tr><td class="cmd-name">velocityValid</td><td>bool</td><td>速度是否有效</td></tr>
+<tr><td class="cmd-name">velocityWCS</td><td>repeated double</td><td>WCS 速度</td></tr>
+<tr><td class="cmd-name">velocityNED</td><td>repeated double</td><td>NED 速度（相对于报告位置）</td></tr>
+<tr><td class="cmd-name">headingValid</td><td>bool</td><td>朝向是否有效</td></tr>
+<tr><td class="cmd-name">heading</td><td>double</td><td>朝向值</td></tr>
+<tr><td class="cmd-name">iff</td><td>string</td><td>敌我识别（ambiguous / foe / friend / neutral / unknown）</td></tr>
+<tr><td class="cmd-name">rangeValid</td><td>bool</td><td>距离是否有效</td></tr>
+<tr><td class="cmd-name">range</td><td>double</td><td>距离（meters）</td></tr>
+<tr><td class="cmd-name">rangeErrorSigma</td><td>double</td><td>距离测量误差标准差（meters）</td></tr>
+<tr><td class="cmd-name">bearingValid</td><td>bool</td><td>方位角是否有效</td></tr>
+<tr><td class="cmd-name">bearing</td><td>double</td><td>方位角（radians，相对于正北）</td></tr>
+<tr><td class="cmd-name">elevationValid</td><td>bool</td><td>仰角是否有效</td></tr>
+<tr><td class="cmd-name">elevation</td><td>double</td><td>仰角（radians）</td></tr>
+<tr><td class="cmd-name">elevationErrorSigma</td><td>double</td><td>仰角误差标准差</td></tr>
+<tr><td class="cmd-name">trackId</td><td>string</td><td>航迹 ID（格式: &lt;name&gt;:&lt;number&gt;）</td></tr>
+<tr><td class="cmd-name">targetName</td><td>string</td><td>航迹对应真实平台名称</td></tr>
+<tr><td class="cmd-name">trackQuality</td><td>double</td><td>航迹质量</td></tr>
+<tr><td class="cmd-name">stale</td><td>bool</td><td>是否过时</td></tr>
+<tr><td class="cmd-name">stateCovarianceValid</td><td>bool</td><td>状态协方差是否有效</td></tr>
+<tr><td class="cmd-name">stateCovarianceMatrix</td><td>repeated double</td><td>状态协方差矩阵（行优先）</td></tr>
+</table>
+
+<h4>Protobuf 定义</h4>
+<pre>message TrackState {
+    int32  localTrackNumber = 1;  // deprecated, use trackId
+    double startTime               = 2;
+    double timeSinceStarted        = 3;
+    double updateTime              = 4;
+    double updateCount             = 5;
+    double timeSinceUpdated        = 6;
+    bool   typeValid               = 7;
+    string type                    = 8;
+    bool   sideValid               = 9;
+    string side                    = 10;
+    bool   locationValid           = 11;
+    repeated double reportedLocationLLA  = 12;
+    repeated double reportedLocationWCS  = 13;
+    repeated double currentLocationLLA   = 14;
+    repeated double currentLocationWCS   = 15;
+    bool   velocityValid           = 16;
+    repeated double velocityWCS    = 17;
+    repeated double velocityNED    = 18; // relative to the reported location
+    bool   headingValid            = 19;
+    double heading                 = 20;
+    string iff                     = 21; // "ambiguous","foe","friend","neutral","unknown"
+    bool   rangeValid              = 22;
+    double range                   = 23; // range of the track (meters)
+    double rangeErrorSigma         = 24; // standard deviation of the error (meters)
+    bool   bearingValid            = 25;
+    double bearing                 = 26; // bearing, radians
+    bool   elevationValid          = 27;
+    double elevation               = 28; // elevation angle from local horizontal (radians)
+    double elevationErrorSigma     = 29;
+    string trackId                 = 30; // &lt;name&gt;:&lt;number&gt;
+    string targetName              = 31; // truth name of platform
+    double trackQuality            = 32;
+    bool   stale                   = 33;
+    bool   stateCovarianceValid    = 34;
+    repeated double stateCovarianceMatrix = 35; // row-major order
+}</pre>
+
+<h3>4.4 WeaponState — 武器状态</h3>
+
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th></tr>
+<tr><td class="cmd-name">name</td><td>string</td><td>武器名称</td></tr>
+<tr><td class="cmd-name">type</td><td>string</td><td>武器类型</td></tr>
+<tr><td class="cmd-name">quantityRemaining</td><td>double</td><td>剩余数量</td></tr>
+</table>
+
+<h3>4.5 ActiveWeaponState — 活跃武器状态</h3>
+
+<div class="note">此消息于 2024-08-19 添加（by lhj）。</div>
+
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th></tr>
+<tr><td class="cmd-name">locationLLA</td><td>repeated double</td><td>[纬度, 经度, 高度]</td></tr>
+<tr><td class="cmd-name">locationWCS</td><td>repeated double</td><td>世界坐标系位置</td></tr>
+<tr><td class="cmd-name">velocityNED</td><td>repeated double</td><td>NED 速度</td></tr>
+<tr><td class="cmd-name">velocityECS</td><td>repeated double</td><td>机体速度（body velocity）</td></tr>
+<tr><td class="cmd-name">orientationNED</td><td>repeated double</td><td>[heading, pitch, roll] ALL RADIANS</td></tr>
+<tr><td class="cmd-name">accelerationNED</td><td>repeated double</td><td>NED 加速度</td></tr>
+<tr><td class="cmd-name">accelerationWCS</td><td>repeated double</td><td>世界坐标系加速度</td></tr>
+<tr><td class="cmd-name">name</td><td>string</td><td>武器名称</td></tr>
+<tr><td class="cmd-name">type</td><td>string</td><td>武器类型</td></tr>
+<tr><td class="cmd-name">side</td><td>string</td><td>阵营</td></tr>
+<tr><td class="cmd-name">currentTarget</td><td>string</td><td>当前目标</td></tr>
+<tr><td class="cmd-name">Domain</td><td>string</td><td>空间域（land / air / surface / subsurface / space / unknown）</td></tr>
+<tr><td class="cmd-name">playtime</td><td>double</td><td>创建时间</td></tr>
+<tr><td class="cmd-name">mode</td><td>string</td><td>当前模式</td></tr>
+<tr><td class="cmd-name">host_id</td><td>string</td><td>宿主平台 ID</td></tr>
+<tr><td class="cmd-name">damage</td><td>double</td><td>毁伤系数</td></tr>
+<tr><td class="cmd-name">effect</td><td>string</td><td>效应类型</td></tr>
+</table>
+
+<h4>Protobuf 定义</h4>
+<pre>message ActiveWeaponState {
+    repeated double locationLLA      = 1;
+    repeated double locationWCS      = 2;
+    repeated double velocityNED      = 3;
+    repeated double velocityECS      = 4;  // body velocity
+    repeated double orientationNED   = 5;  // [heading,pitch,roll] ALL RADIANS
+    repeated double accelerationNED  = 6;
+    repeated double accelerationWCS  = 7;
+    string          name             = 8;
+    string          type             = 9;
+    string          side             = 10;
+    string          currentTarget    = 11;
+    string          Domain           = 12; // land, air, surface, subsurface, space, unknown
+    double          playtime         = 13;
+    string          mode             = 14;
+    string          host_id          = 15;
+    double          damage           = 16;
+    string          effect           = 17;
+}</pre>
+
+<h3>4.6 AuxData — 自定义数据</h3>
+
+<pre>message AuxData {
+    string key  = 1;
+    uint32 type = 3; // 0=STRING, 1=DOUBLE, 2=BOOL, 3=DICT
+
+    string stringValue       = 2; // type=0 时使用
+    double doubleValue       = 4; // type=1 时使用
+    bool   boolValue         = 5; // type=2 时使用
+    repeated AuxData dictValue = 6; // type=3 时使用（嵌套字典）
+}</pre>
+
+<p class="back-top"><a href="#">↑ 回到顶部</a></p>
+
+</div>
+</body>
+</html>

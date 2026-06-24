@@ -2479,6 +2479,16 @@ mark.search-highlight {
 .capability-preview { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; margin-top: 12px; }
 .capability-preview-title { font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
 
+/* ── Intent → Command full-chain trace ── */
+.intent-trace { display: flex; flex-direction: column; gap: 0; }
+.trace-stage { position: relative; border-left: 2px solid var(--border); padding: 0 0 14px 16px; }
+.trace-stage:last-child { padding-bottom: 0; }
+.trace-stage-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.trace-step { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 11px; font-weight: 700; position: absolute; left: -10px; top: 0; }
+.trace-label { font-size: 12px; font-weight: 600; }
+.trace-body { margin-top: 6px; background: var(--bg); border-radius: 4px; padding: 8px; }
+.trace-cmd { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-family: var(--font-mono, monospace); }
+
 /* ── Ready Panel (Channel step 3) ── */
 .ready-panel { text-align: center; padding: 24px 16px; }
 .ready-panel-icon { font-size: 48px; color: var(--success); margin-bottom: 8px; }

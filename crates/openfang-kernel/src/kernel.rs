@@ -14,6 +14,7 @@ use crate::triggers::{TriggerEngine, TriggerId, TriggerPattern};
 use crate::workflow::{StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId};
 
 use openfang_memory::MemorySubstrate;
+use openfang_platform::AdapterRegistry;
 use openfang_runtime::agent_loop::{
     run_agent_loop, run_agent_loop_streaming, strip_provider_prefix, AgentLoopResult,
 };
@@ -28,7 +29,7 @@ use openfang_runtime::routing::ModelRouter;
 use openfang_runtime::sandbox::{SandboxConfig, WasmSandbox};
 use openfang_runtime::tool_runner::builtin_tool_definitions;
 use openfang_types::agent::*;
-use openfang_types::capability::Capability;
+use openfang_types::capability::{capability_matches, Capability};
 use openfang_types::config::KernelConfig;
 use openfang_types::error::OpenFangError;
 use openfang_types::event::*;
@@ -45,6 +46,44 @@ use tracing::{debug, info, warn};
 /// Returns a helpful error so the dashboard still boots and users can configure providers.
 struct StubDriver;
 
+/// Whether a command is a maneuver (motion/route) command owned by the MMS
+/// lane. Used to deduplicate the DSL function lane against MMS so a single
+/// deterministic source drives heading/speed/route.
+fn is_maneuver_command(cmd: &openfang_types::platform::PlatformCommand) -> bool {
+    use openfang_types::platform::PlatformCommand::*;
+    matches!(
+        cmd,
+        SetHeading { .. }
+            | SetSpeed { .. }
+            | SetAltitude { .. }
+            | GotoLocation { .. }
+            | FollowRoute { .. }
+    )
+}
+
+fn commander_intent_compile_text(intent: &openfang_types::cognition::CommanderIntent) -> String {
+    let mut parts = vec![intent.objective.trim().to_string()];
+    if !intent.priority_tracks.is_empty() {
+        parts.push(format!(
+            "priority_tracks: {}",
+            intent.priority_tracks.join(", ")
+        ));
+    }
+    if !intent.priority_labels.is_empty() {
+        parts.push(format!(
+            "priority_labels: {}",
+            intent.priority_labels.join(", ")
+        ));
+    }
+    if !intent.constraints.is_empty() {
+        parts.push(format!("constraints: {}", intent.constraints.join(", ")));
+    }
+    if let Some(roe) = &intent.roe_pref {
+        parts.push(format!("roe_pref: {roe:?}"));
+    }
+    parts.join("\n")
+}
+
 #[async_trait]
 impl LlmDriver for StubDriver {
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
@@ -54,6 +93,91 @@ impl LlmDriver for StubDriver {
              or use Ollama for local models (no API key needed)."
                 .to_string(),
         ))
+    }
+}
+
+/// Apply `[provider_urls]` and `[default_model].base_url` to the model catalog.
+fn sync_model_catalog_llm_urls(
+    catalog: &mut openfang_runtime::model_catalog::ModelCatalog,
+    config: &KernelConfig,
+) {
+    if !config.provider_urls.is_empty() {
+        catalog.apply_url_overrides(&config.provider_urls);
+    }
+    if let Some(url) = &config.default_model.base_url {
+        catalog.set_provider_url(&config.default_model.provider, url);
+    }
+}
+
+/// Build the kernel default LLM driver (primary + optional fallback chain).
+fn build_default_llm_driver(config: &KernelConfig) -> Arc<dyn LlmDriver> {
+    let driver_config = DriverConfig {
+        provider: config.default_model.provider.clone(),
+        api_key: std::env::var(&config.default_model.api_key_env).ok(),
+        base_url: config.default_model.base_url.clone().or_else(|| {
+            config
+                .provider_urls
+                .get(&config.default_model.provider)
+                .cloned()
+        }),
+    };
+    let primary_result = drivers::create_driver(&driver_config);
+    let mut driver_chain: Vec<Arc<dyn LlmDriver>> = Vec::new();
+
+    match &primary_result {
+        Ok(d) => driver_chain.push(d.clone()),
+        Err(e) => {
+            warn!(
+                provider = %config.default_model.provider,
+                error = %e,
+                "Primary LLM driver init failed — dashboard will still be accessible"
+            );
+        }
+    }
+
+    for fb in &config.fallback_providers {
+        let fb_config = DriverConfig {
+            provider: fb.provider.clone(),
+            api_key: if fb.api_key_env.is_empty() {
+                None
+            } else {
+                std::env::var(&fb.api_key_env).ok()
+            },
+            base_url: fb
+                .base_url
+                .clone()
+                .or_else(|| config.provider_urls.get(&fb.provider).cloned()),
+        };
+        match drivers::create_driver(&fb_config) {
+            Ok(d) => {
+                info!(
+                    provider = %fb.provider,
+                    model = %fb.model,
+                    "Fallback provider configured"
+                );
+                driver_chain.push(d);
+            }
+            Err(e) => {
+                warn!(
+                    provider = %fb.provider,
+                    error = %e,
+                    "Fallback provider init failed — skipped"
+                );
+            }
+        }
+    }
+
+    if driver_chain.len() > 1 {
+        Arc::new(openfang_runtime::drivers::fallback::FallbackDriver::new(
+            driver_chain,
+        ))
+    } else if let Some(single) = driver_chain.into_iter().next() {
+        single
+    } else {
+        warn!(
+            "No LLM drivers available — agents will return errors until a provider is configured"
+        );
+        Arc::new(StubDriver) as Arc<dyn LlmDriver>
     }
 }
 
@@ -82,8 +206,8 @@ pub struct OpenFangKernel {
     pub audit_log: Arc<AuditLog>,
     /// Cost metering engine.
     pub metering: Arc<MeteringEngine>,
-    /// Default LLM driver (from kernel config).
-    default_driver: Arc<dyn LlmDriver>,
+    /// Default LLM driver (from kernel config); hot-swappable on URL/model changes.
+    default_driver: Arc<std::sync::RwLock<Arc<dyn LlmDriver>>>,
     /// WASM sandbox engine (shared across all WASM agent executions).
     wasm_sandbox: WasmSandbox,
     /// RBAC authentication manager.
@@ -115,20 +239,75 @@ pub struct OpenFangKernel {
     /// Embedding driver for vector similarity search (None = text fallback).
     pub embedding_driver:
         Option<Arc<dyn openfang_runtime::embedding::EmbeddingDriver + Send + Sync>>,
-    /// Hand registry — curated autonomous capability packages.
-    pub hand_registry: openfang_hands::registry::HandRegistry,
-    /// Extension/integration registry (bundled MCP templates + install state).
-    pub extension_registry: std::sync::RwLock<openfang_extensions::registry::IntegrationRegistry>,
-    /// Integration health monitor.
-    pub extension_health: openfang_extensions::health::HealthMonitor,
-    /// Effective MCP server list (manual config + extension-installed, merged at boot).
+    /// Effective MCP server list (from config).
     pub effective_mcp_servers: std::sync::RwLock<Vec<openfang_types::config::McpServerConfigEntry>>,
-    /// Delivery receipt tracker (bounded LRU, max 10K entries).
-    pub delivery_tracker: DeliveryTracker,
     /// Cron job scheduler.
     pub cron_scheduler: crate::cron::CronScheduler,
     /// Execution approval manager.
     pub approval_manager: crate::approval::ApprovalManager,
+    /// Platform adapter registry — bridges Agent to simulation/hardware backends.
+    pub platform_registry: Arc<AdapterRegistry>,
+    /// Live platform control loop shared by agent tools and the background tick.
+    pub platform_control:
+        Option<Arc<tokio::sync::Mutex<crate::platform_control::PlatformControlLoop>>>,
+    /// Human-confirmed target authorizations shared by API and platform gates.
+    pub target_authorizations:
+        Arc<openfang_runtime::target_authorization::TargetAuthorizationRegistry>,
+    /// Persistent mission-plan approvals (by plan fingerprint) backing the
+    /// slow-loop `Confirm`/`Quorum` checkpoint. Shared with API and the gate.
+    pub mission_approvals: Arc<openfang_runtime::mission_approval::MissionApprovalRegistry>,
+    /// Abort handle for the live platform background loop, if enabled.
+    pub platform_control_task: Option<tokio::task::AbortHandle>,
+    /// Runtime override for the active autonomy-mode profile id (M3-U5).
+    ///
+    /// When `Some(id)`, [`Self::active_autonomy_mode_id`] returns this value
+    /// instead of `config.platform.autonomy.active_profile`, and the live
+    /// [`PlatformControlLoop`]'s gate-side profile is hot-swapped to match.
+    /// This is the runtime knob behind `PUT /api/autonomy/profile`.
+    pub autonomy_override: Arc<std::sync::RwLock<Option<String>>>,
+    /// Latest cerebellum step report (M3-U5). Published by the background tick
+    /// after every successful `PlatformControlLoop::step`, consumed by
+    /// `GET /api/services/health` to surface PSS/DCC/SMS intent counts and the
+    /// embedded gate/dispatch pipeline report.
+    pub latest_step_report: Arc<tokio::sync::RwLock<Option<crate::platform_control::StepReport>>>,
+    /// Latest fleet picture observed by the live control loop (M4-U6).
+    /// Populated each tick from the freshest [`WorldSnapshot::fleet`]; consumed
+    /// by the federation engine and `GET /api/federation/status` so the
+    /// dashboard and audit log see the same picture the cerebellum saw.
+    pub latest_fleet_snapshot:
+        Arc<tokio::sync::RwLock<Option<openfang_types::platform::FleetSnapshot>>>,
+    /// Operator-driven [`LinkQuality`] override (M4-U6). `None` ⇒ the federation
+    /// engine and the control loop use the link quality observed on the
+    /// own-platform snapshot; `Some(q)` ⇒ the simulated value wins, so live
+    /// integration tests can drive `Poor`/`Lost` blackouts without standing up
+    /// a real CMS peer. This is the *same* `Arc` the control loop reads each
+    /// tick, so writing it actually degrades the gate, not just the report.
+    pub simulated_link_quality:
+        Arc<std::sync::RwLock<Option<openfang_types::platform::LinkQuality>>>,
+    /// Link quality observed on the latest own-platform snapshot (M4-U6),
+    /// published by the control-loop tick. Read by `GET /api/federation/status`
+    /// so the dashboard shows the real bucket when no override is set.
+    pub observed_link_quality: Arc<std::sync::RwLock<openfang_types::platform::LinkQuality>>,
+    /// Commander-intent inbox feeding the slow cognitive loop. Shared with the
+    /// API layer so injected intents are actually consumed by the planner.
+    pub platform_intents: Arc<openfang_runtime::planning::IntentInbox>,
+    /// Pending semantic label resolutions awaiting operator confirmation.
+    pub label_resolutions: Arc<openfang_runtime::planning::LabelResolutionRegistry>,
+    /// Compiled DSL missions awaiting operator confirmation (`dsl_mode=confirm`).
+    /// Shared with the API so a freeform objective compiled by the slow loop can
+    /// be previewed, confirmed (→ dispatched to the fast loop), or dismissed.
+    pub pending_missions: Arc<openfang_runtime::mission_registry::PendingMissionRegistry>,
+    /// Latest slow-loop cognitive report, refreshed each planning cycle and
+    /// exposed to the API/UI for the tactical console.
+    pub latest_cognitive_report:
+        Arc<tokio::sync::RwLock<Option<openfang_runtime::cognitive_pipeline::CognitiveReport>>>,
+    /// Live control policy (controlled side / threat side / entity allow-list).
+    /// Single runtime source of truth: read each cycle by the slow loop and by
+    /// `GET /api/platform/pending`, and updated on config hot-reload so changing
+    /// the controlled side takes effect without a process restart.
+    pub control_policy: Arc<std::sync::RwLock<openfang_types::config::PlatformControlPolicy>>,
+    /// Abort handle for the slow cognitive planning loop, if enabled.
+    pub cognitive_loop_task: Option<tokio::task::AbortHandle>,
     /// Agent bindings for multi-account routing (Mutex for runtime add/remove).
     pub bindings: std::sync::Mutex<Vec<openfang_types::config::AgentBinding>>,
     /// Broadcast configuration.
@@ -147,118 +326,19 @@ pub struct OpenFangKernel {
     pub booted_at: std::time::Instant,
     /// WhatsApp Web gateway child process PID (for shutdown cleanup).
     pub whatsapp_gateway_pid: Arc<std::sync::Mutex<Option<u32>>>,
-    /// Channel adapters registered at bridge startup (for proactive `channel_send` tool).
-    pub channel_adapters: dashmap::DashMap<String, Arc<dyn openfang_channels::types::ChannelAdapter>>,
+    /// llama.cpp server child process PID (for shutdown cleanup).
+    pub llamacpp_server_pid: Arc<std::sync::Mutex<Option<u32>>>,
     /// Hot-reloadable default model override (set via config hot-reload, read at agent spawn).
-    pub default_model_override: std::sync::RwLock<Option<openfang_types::config::DefaultModelConfig>>,
+    pub default_model_override:
+        std::sync::RwLock<Option<openfang_types::config::DefaultModelConfig>>,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<OpenFangKernel>>,
 }
 
-/// Bounded in-memory delivery receipt tracker.
-/// Stores up to `MAX_RECEIPTS` most recent delivery receipts per agent.
-pub struct DeliveryTracker {
-    receipts: dashmap::DashMap<AgentId, Vec<openfang_channels::types::DeliveryReceipt>>,
-}
-
-impl Default for DeliveryTracker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DeliveryTracker {
-    const MAX_RECEIPTS: usize = 10_000;
-    const MAX_PER_AGENT: usize = 500;
-
-    /// Create a new empty delivery tracker.
-    pub fn new() -> Self {
-        Self {
-            receipts: dashmap::DashMap::new(),
-        }
-    }
-
-    /// Record a delivery receipt for an agent.
-    pub fn record(&self, agent_id: AgentId, receipt: openfang_channels::types::DeliveryReceipt) {
-        let mut entry = self.receipts.entry(agent_id).or_default();
-        entry.push(receipt);
-        // Per-agent cap
-        if entry.len() > Self::MAX_PER_AGENT {
-            let drain = entry.len() - Self::MAX_PER_AGENT;
-            entry.drain(..drain);
-        }
-        // Global cap: evict oldest agents' receipts if total exceeds limit
-        drop(entry);
-        let total: usize = self.receipts.iter().map(|e| e.value().len()).sum();
-        if total > Self::MAX_RECEIPTS {
-            // Simple eviction: remove oldest entries from first agent found
-            if let Some(mut oldest) = self.receipts.iter_mut().next() {
-                let to_remove = total - Self::MAX_RECEIPTS;
-                let drain = to_remove.min(oldest.value().len());
-                oldest.value_mut().drain(..drain);
-            }
-        }
-    }
-
-    /// Get recent delivery receipts for an agent (newest first).
-    pub fn get_receipts(
-        &self,
-        agent_id: AgentId,
-        limit: usize,
-    ) -> Vec<openfang_channels::types::DeliveryReceipt> {
-        self.receipts
-            .get(&agent_id)
-            .map(|entries| entries.iter().rev().take(limit).cloned().collect())
-            .unwrap_or_default()
-    }
-
-    /// Create a receipt for a successful send.
-    pub fn sent_receipt(
-        channel: &str,
-        recipient: &str,
-    ) -> openfang_channels::types::DeliveryReceipt {
-        openfang_channels::types::DeliveryReceipt {
-            message_id: uuid::Uuid::new_v4().to_string(),
-            channel: channel.to_string(),
-            recipient: Self::sanitize_recipient(recipient),
-            status: openfang_channels::types::DeliveryStatus::Sent,
-            timestamp: chrono::Utc::now(),
-            error: None,
-        }
-    }
-
-    /// Create a receipt for a failed send.
-    pub fn failed_receipt(
-        channel: &str,
-        recipient: &str,
-        error: &str,
-    ) -> openfang_channels::types::DeliveryReceipt {
-        openfang_channels::types::DeliveryReceipt {
-            message_id: uuid::Uuid::new_v4().to_string(),
-            channel: channel.to_string(),
-            recipient: Self::sanitize_recipient(recipient),
-            status: openfang_channels::types::DeliveryStatus::Failed,
-            timestamp: chrono::Utc::now(),
-            // Sanitize error: no credentials, max 256 chars
-            error: Some(
-                error
-                    .chars()
-                    .take(256)
-                    .collect::<String>()
-                    .replace(|c: char| c.is_control(), ""),
-            ),
-        }
-    }
-
-    /// Sanitize recipient to avoid PII logging.
-    fn sanitize_recipient(recipient: &str) -> String {
-        let s: String = recipient
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(64)
-            .collect();
-        s
-    }
+fn all_builtin_tool_definitions() -> Vec<ToolDefinition> {
+    let mut tools = builtin_tool_definitions();
+    tools.extend(openfang_runtime::platform_tools::platform_tool_definitions());
+    tools
 }
 
 /// Create workspace directory structure for an agent.
@@ -495,6 +575,317 @@ fn gethostname() -> Option<String> {
 }
 
 impl OpenFangKernel {
+    /// Clone the kernel default LLM driver for subsystems that need semantic
+    /// parsing outside a specific agent loop.
+    pub fn default_llm_driver(&self) -> Arc<dyn LlmDriver> {
+        self.default_driver
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Currently active autonomy mode id (e.g. `observe_only`,
+    /// `supervised_autonomy`, `defensive_autonomy`). Used by the tactical
+    /// policy layer to decide whether a persona may participate in actuation
+    /// under the current operational envelope.
+    ///
+    /// Resolution order:
+    /// 1. Runtime override set via [`Self::set_active_autonomy_profile`]
+    ///    (M3-U5; surfaced by `PUT /api/autonomy/profile`).
+    /// 2. `[platform.autonomy.active_profile]` from configuration.
+    /// 3. [`openfang_runtime::tactical_policy::DEFAULT_AUTONOMY_MODE`] —
+    ///    preserves the legacy "no envelope" behaviour.
+    pub fn active_autonomy_mode_id(&self) -> String {
+        if let Ok(guard) = self.autonomy_override.read() {
+            if let Some(id) = guard.as_ref() {
+                let trimmed = id.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+        let active = self
+            .config
+            .platform
+            .autonomy
+            .active_profile
+            .trim()
+            .to_string();
+        if active.is_empty() {
+            openfang_runtime::tactical_policy::DEFAULT_AUTONOMY_MODE.to_string()
+        } else {
+            active
+        }
+    }
+
+    /// Hot-switch the active autonomy-mode profile (M3-U5).
+    ///
+    /// Updates both halves of the dual-landing: the prompt-side override
+    /// (read by [`Self::active_autonomy_mode_id`] and surfaced to LLM agents
+    /// via [`Self::active_autonomy_brief`]) and the gate-side
+    /// `PlatformControlLoop::set_autonomy_profile` shared profile.
+    ///
+    /// Returns `Ok(previous_profile_id)` on success — the new profile takes
+    /// effect on the next control-loop tick. Returns `Err` describing why the
+    /// switch was rejected when the requested id is empty or not listed under
+    /// `[platform.autonomy.profiles]`.
+    ///
+    /// Records an audit event tagged with the calling actor (typically the
+    /// API caller's identity or the configured controller).
+    pub fn set_active_autonomy_profile(&self, new_id: &str, actor: &str) -> Result<String, String> {
+        let trimmed = new_id.trim();
+        if trimmed.is_empty() {
+            return Err("autonomy profile id must not be empty".to_string());
+        }
+        let profile = self
+            .config
+            .platform
+            .autonomy
+            .profile(trimmed)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "unknown autonomy profile '{trimmed}'. Configure it under [platform.autonomy.profiles]."
+                )
+            })?;
+
+        let previous = self.active_autonomy_mode_id();
+        if let Ok(mut guard) = self.autonomy_override.write() {
+            *guard = Some(profile.id.clone());
+        }
+        // Gate-side: hot-swap the shared profile so the next tick enforces it.
+        if let Some(control) = &self.platform_control {
+            match control.try_lock() {
+                Ok(mut control_guard) => {
+                    let _ = control_guard.set_autonomy_profile(profile.clone());
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "set_active_autonomy_profile: platform control busy; gate-side update deferred until next idle tick"
+                    );
+                }
+            }
+        }
+        self.audit_log.record(
+            actor,
+            openfang_runtime::audit::AuditAction::ConfigChange,
+            format!("autonomy profile switched: {previous} → {}", profile.id),
+            &profile.id,
+        );
+        Ok(previous)
+    }
+
+    /// Snapshot of the cerebellum service health (M3-U5). Reads the most
+    /// recent [`crate::platform_control::StepReport`] published by the
+    /// background tick and the live autonomy envelope, and returns a
+    /// JSON-ready summary for `GET /api/services/health`.
+    pub async fn service_health_snapshot(&self) -> serde_json::Value {
+        let report = self.latest_step_report.read().await.clone();
+        let active_id = self.active_autonomy_mode_id();
+        let envelope = self.config.platform.autonomy.profile(&active_id).cloned();
+        let mut services = Vec::<serde_json::Value>::with_capacity(8);
+
+        // The 8 deterministic cerebellum services and their live metrics.
+        // SMS / MMS / EWMS / CMS report indirectly through DCC + pipeline
+        // counters; PSS exposes its own intent count.
+        let (polled, dcc, pss, sms, mms, ewms, cms, survivors, fused, correlations, pipeline) =
+            report
+                .as_ref()
+                .map(|r| {
+                    (
+                        r.polled,
+                        r.dcc_intents,
+                        r.pss_intents,
+                        r.sms_intents,
+                        r.mms_intents,
+                        r.ewms_intents,
+                        r.cms_intents,
+                        r.survivors,
+                        r.fused_tracks,
+                        r.track_correlations,
+                        serde_json::json!({
+                            "approved": r.pipeline.dispatched,
+                            "rejected": r.pipeline.rejected,
+                            "pending": r.pipeline.pending,
+                            "expired": r.pipeline.expired,
+                        }),
+                    )
+                })
+                .unwrap_or((false, 0, 0, 0, 0, 0, 0, 0, 0, 0, serde_json::json!(null)));
+
+        services.push(serde_json::json!({
+            "id": "sms",
+            "name": "Sensor Management Service",
+            "healthy": polled,
+            "sms_intents": sms,
+            "fused_tracks": fused,
+            "track_correlations": correlations,
+        }));
+        services.push(serde_json::json!({
+            "id": "mms",
+            "name": "Maneuver Management Service",
+            "healthy": report.is_some(),
+            "mms_intents": mms,
+            "dcc_intents": dcc,
+        }));
+        services.push(serde_json::json!({
+            "id": "wms",
+            "name": "Weapon Management Service",
+            "healthy": pipeline.is_object() || report.is_some(),
+            "pipeline": pipeline.clone(),
+        }));
+        services.push(serde_json::json!({
+            "id": "cms",
+            "name": "Communications Management Service",
+            "healthy": report.is_some(),
+            "cms_intents": cms,
+        }));
+        services.push(serde_json::json!({
+            "id": "ewms",
+            "name": "EW Management Service",
+            "healthy": report.is_some(),
+            "ewms_intents": ewms,
+            "dcc_intents": dcc,
+        }));
+        services.push(serde_json::json!({
+            "id": "pss",
+            "name": "Platform Survivability Service",
+            "healthy": report.is_some(),
+            "pss_intents": pss,
+        }));
+        services.push(serde_json::json!({
+            "id": "spgs",
+            "name": "Safety Policy Gate Service",
+            "healthy": report.is_some(),
+            "survivors_after_screen": survivors,
+        }));
+        services.push(serde_json::json!({
+            "id": "acs",
+            "name": "Action Composer Service",
+            "healthy": report.is_some(),
+            "pipeline": pipeline,
+        }));
+
+        serde_json::json!({
+            "polled": polled,
+            "autonomy_profile": {
+                "active_id": active_id,
+                "envelope": envelope,
+                "overridden_at_runtime": self.autonomy_override.read().ok().and_then(|g| g.is_some().then_some(true)),
+            },
+            "services": services,
+        })
+    }
+
+    /// Live federation status (M4-U6). Combines the latest fleet snapshot, the
+    /// simulated/observed link quality, and the configured priority order into
+    /// a [`openfang_runtime::federation::FederationStatus`] consumed by
+    /// `GET /api/federation/status` and the dashboard.
+    pub async fn federation_status(&self) -> openfang_runtime::federation::FederationStatus {
+        use openfang_runtime::federation::{refresh_status, FederationInputs};
+        use openfang_types::platform::{FleetSnapshot, LinkQuality};
+
+        let local_id = self.config.platform.own_platform_id.clone();
+        let fleet = self
+            .latest_fleet_snapshot
+            .read()
+            .await
+            .clone()
+            .unwrap_or_else(|| FleetSnapshot::new(local_id.clone()));
+        // Effective link bucket: operator override wins; otherwise the live
+        // observed value the control-loop tick published; otherwise Excellent.
+        let link_quality: LinkQuality = self
+            .simulated_link_quality
+            .read()
+            .ok()
+            .and_then(|g| *g)
+            .or_else(|| self.observed_link_quality.read().ok().map(|g| *g))
+            .unwrap_or(LinkQuality::Excellent);
+
+        let mut autonomy_view = self.config.platform.autonomy.clone();
+        if let Some(active_override) = self
+            .autonomy_override
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .filter(|id| !id.is_empty())
+        {
+            autonomy_view.active_profile = active_override;
+        }
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+
+        let inputs = FederationInputs {
+            local_id: &local_id,
+            fleet: &fleet,
+            link_quality,
+            now_secs,
+        };
+
+        refresh_status(&inputs, &self.config.platform.federation, &autonomy_view)
+    }
+
+    /// Set the simulated [`LinkQuality`] used by the federation engine (M4-U6).
+    /// Operator-driven so live integration tests can step the system through
+    /// the `Excellent → Poor → Lost → Excellent` degradation matrix without
+    /// having to physically tear down the OFP link.
+    ///
+    /// Returns the previous value for audit.
+    pub fn set_simulated_link_quality(
+        &self,
+        quality: openfang_types::platform::LinkQuality,
+        actor: &str,
+    ) -> openfang_types::platform::LinkQuality {
+        // The override is the *same* Arc the control loop reads each tick, so
+        // writing it degrades the gate-side effective profile, not just the
+        // status report (M4-U6 fix: degradation is no longer cosmetic).
+        let previous = self
+            .simulated_link_quality
+            .read()
+            .ok()
+            .and_then(|g| *g)
+            .unwrap_or(openfang_types::platform::LinkQuality::Excellent);
+        if let Ok(mut guard) = self.simulated_link_quality.write() {
+            *guard = Some(quality);
+        }
+        self.audit_log.record(
+            actor,
+            openfang_runtime::audit::AuditAction::ConfigChange,
+            format!(
+                "federation link_quality: {} → {}",
+                previous.as_str(),
+                quality.as_str()
+            ),
+            quality.as_str(),
+        );
+        previous
+    }
+
+    /// Build a prompt-side briefing of the active autonomy profile for a
+    /// specific agent. Returns `None` when no profile is configured, the
+    /// manifest is not a tactical persona, or the agent does not opt into the
+    /// active profile (its `allowed_autonomy_modes` allow-list).
+    ///
+    /// This is the *soft* half of the dual-landing: prompts adapt to the
+    /// envelope, the gate enforces it.
+    pub fn active_autonomy_brief(
+        &self,
+        manifest: &AgentManifest,
+    ) -> Option<openfang_runtime::prompt_builder::AutonomyProfileBrief> {
+        // Only brief tactical personas.
+        let policy = manifest.tactical_policy.as_ref()?;
+        let active_id = self.active_autonomy_mode_id();
+        // Respect per-agent autonomy-mode allowlist.
+        if !policy.allows_autonomy_mode(&active_id) {
+            return None;
+        }
+        let profile = self.config.platform.autonomy.profile(&active_id)?;
+        Some(openfang_runtime::prompt_builder::AutonomyProfileBrief::from_profile(profile))
+    }
+
     /// Boot the kernel with configuration from the given path.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
         let config = load_config(config_path);
@@ -546,78 +937,12 @@ impl OpenFangKernel {
                 .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?,
         );
 
-        // Create LLM driver
-        let driver_config = DriverConfig {
-            provider: config.default_model.provider.clone(),
-            api_key: std::env::var(&config.default_model.api_key_env).ok(),
-            base_url: config
-                .default_model
-                .base_url
-                .clone()
-                .or_else(|| config.provider_urls.get(&config.default_model.provider).cloned()),
-        };
-        // Primary driver failure is non-fatal: the dashboard should remain accessible
-        // even if the LLM provider is misconfigured. Users can fix config via dashboard.
-        let primary_result = drivers::create_driver(&driver_config);
-        let mut driver_chain: Vec<Arc<dyn LlmDriver>> = Vec::new();
+        // Start managed llama.cpp server (when configured) and wire default_model URLs.
+        let llamacpp_pid = crate::llamacpp_server::prepare(&mut config)
+            .map_err(|e| KernelError::BootFailed(format!("llama.cpp init failed: {e}")))?;
 
-        match &primary_result {
-            Ok(d) => driver_chain.push(d.clone()),
-            Err(e) => {
-                warn!(
-                    provider = %config.default_model.provider,
-                    error = %e,
-                    "Primary LLM driver init failed — dashboard will still be accessible"
-                );
-            }
-        }
-
-        // Add fallback providers to the chain
-        for fb in &config.fallback_providers {
-            let fb_config = DriverConfig {
-                provider: fb.provider.clone(),
-                api_key: if fb.api_key_env.is_empty() {
-                    None
-                } else {
-                    std::env::var(&fb.api_key_env).ok()
-                },
-                base_url: fb
-                    .base_url
-                    .clone()
-                    .or_else(|| config.provider_urls.get(&fb.provider).cloned()),
-            };
-            match drivers::create_driver(&fb_config) {
-                Ok(d) => {
-                    info!(
-                        provider = %fb.provider,
-                        model = %fb.model,
-                        "Fallback provider configured"
-                    );
-                    driver_chain.push(d);
-                }
-                Err(e) => {
-                    warn!(
-                        provider = %fb.provider,
-                        error = %e,
-                        "Fallback provider init failed — skipped"
-                    );
-                }
-            }
-        }
-
-        // Use the chain, or create a stub driver if everything failed
-        let driver: Arc<dyn LlmDriver> = if driver_chain.len() > 1 {
-            Arc::new(openfang_runtime::drivers::fallback::FallbackDriver::new(
-                driver_chain,
-            ))
-        } else if let Some(single) = driver_chain.into_iter().next() {
-            single
-        } else {
-            // All drivers failed — use a stub that returns a helpful error.
-            // The kernel boots, dashboard is accessible, users can fix their config.
-            warn!("No LLM drivers available — agents will return errors until a provider is configured");
-            Arc::new(StubDriver) as Arc<dyn LlmDriver>
-        };
+        // Create LLM driver (primary + optional fallback chain).
+        let driver = build_default_llm_driver(&config);
 
         // Initialize metering engine (shares the same SQLite connection as the memory substrate)
         let metering = Arc::new(MeteringEngine::new(Arc::new(
@@ -640,11 +965,12 @@ impl OpenFangKernel {
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog = openfang_runtime::model_catalog::ModelCatalog::new();
         model_catalog.detect_auth();
-        if !config.provider_urls.is_empty() {
-            model_catalog.apply_url_overrides(&config.provider_urls);
+        sync_model_catalog_llm_urls(&mut model_catalog, &config);
+        if !config.provider_urls.is_empty() || config.default_model.base_url.is_some() {
             info!(
-                "applied {} provider URL override(s)",
-                config.provider_urls.len()
+                "applied LLM URL overrides (provider_urls={}, default_model.base_url={})",
+                config.provider_urls.len(),
+                config.default_model.base_url.is_some()
             );
         }
         // Load user's custom models from ~/.openfang/custom_models.json
@@ -687,54 +1013,7 @@ impl OpenFangKernel {
             skill_registry.freeze();
         }
 
-        // Initialize hand registry (curated autonomous packages)
-        let hand_registry = openfang_hands::registry::HandRegistry::new();
-        let hand_count = hand_registry.load_bundled();
-        if hand_count > 0 {
-            info!("Loaded {hand_count} bundled hand(s)");
-        }
-
-        // Initialize extension/integration registry
-        let mut extension_registry =
-            openfang_extensions::registry::IntegrationRegistry::new(&config.home_dir);
-        let ext_bundled = extension_registry.load_bundled();
-        match extension_registry.load_installed() {
-            Ok(count) => {
-                if count > 0 {
-                    info!("Loaded {count} installed integration(s)");
-                }
-            }
-            Err(e) => {
-                warn!("Failed to load installed integrations: {e}");
-            }
-        }
-        info!(
-            "Extension registry: {ext_bundled} templates available, {} installed",
-            extension_registry.installed_count()
-        );
-
-        // Merge installed integrations into MCP server list
-        let ext_mcp_configs = extension_registry.to_mcp_configs();
-        let mut all_mcp_servers = config.mcp_servers.clone();
-        for ext_cfg in ext_mcp_configs {
-            // Avoid duplicates — don't add if a manual config already exists with same name
-            if !all_mcp_servers.iter().any(|s| s.name == ext_cfg.name) {
-                all_mcp_servers.push(ext_cfg);
-            }
-        }
-
-        // Initialize integration health monitor
-        let health_config = openfang_extensions::health::HealthMonitorConfig {
-            auto_reconnect: config.extensions.auto_reconnect,
-            max_reconnect_attempts: config.extensions.reconnect_max_attempts,
-            max_backoff_secs: config.extensions.reconnect_max_backoff_secs,
-            check_interval_secs: config.extensions.health_check_interval_secs,
-        };
-        let extension_health = openfang_extensions::health::HealthMonitor::new(health_config);
-        // Register all installed integrations for health monitoring
-        for inst in extension_registry.to_mcp_configs() {
-            extension_health.register(&inst.name);
-        }
+        let all_mcp_servers = config.mcp_servers.clone();
 
         // Initialize web tools (multi-provider search + SSRF-protected fetch + caching)
         let cache_ttl = std::time::Duration::from_secs(config.web.cache_ttl_minutes * 60);
@@ -884,6 +1163,755 @@ impl OpenFangKernel {
         // Initialize execution approval manager
         let approval_manager = crate::approval::ApprovalManager::new(config.approval.clone());
 
+        // Initialize platform adapter registry from config (mock/dds/arksim).
+        // When the platform layer is disabled this is an empty registry.
+        let platform_registry = Arc::new(crate::platform_boot::build_registry(&config.platform));
+        let audit_log = Arc::new(AuditLog::new());
+        let target_authorizations =
+            Arc::new(openfang_runtime::target_authorization::TargetAuthorizationRegistry::new());
+        let mission_approvals =
+            Arc::new(openfang_runtime::mission_approval::MissionApprovalRegistry::new());
+        // M4-U6: the link-quality override is shared with the control loop so a
+        // simulated/observed degradation actually swaps the gate-side effective
+        // profile. `observed_link_quality` mirrors the live snapshot bucket for
+        // the federation status report. Both default to the healthy path.
+        let mut simulated_link_quality: Arc<
+            std::sync::RwLock<Option<openfang_types::platform::LinkQuality>>,
+        > = Arc::new(std::sync::RwLock::new(None));
+        let observed_link_quality: Arc<std::sync::RwLock<openfang_types::platform::LinkQuality>> =
+            Arc::new(std::sync::RwLock::new(
+                openfang_types::platform::LinkQuality::Excellent,
+            ));
+        let (platform_control, platform_planning_gate) =
+            if platform_registry.has_primary() && config.platform.is_enabled() {
+                let restrictions = Arc::new(
+                    openfang_runtime::op_restrictions::OpRestrictionsManager::new(
+                        openfang_types::umaa::RulesOfEngagement {
+                            weapon_release_authority: config.platform.weapon_release_authority,
+                            ..Default::default()
+                        },
+                        openfang_types::umaa::PlatformLimits::default(),
+                    ),
+                );
+                let control_loop = crate::platform_control::PlatformControlLoop::from_config(
+                    Arc::clone(&platform_registry),
+                    &config.platform,
+                    restrictions,
+                    Arc::clone(&audit_log),
+                    platform_registry.combined_capabilities(),
+                    Arc::clone(&target_authorizations),
+                    Arc::clone(&mission_approvals),
+                );
+                // DCC rules are installed by `from_config` from `cfg.platform.dcc`
+                // (enable switch + built-in install toggle + evasion params), so
+                // no explicit hard-coded install is needed on the config path.
+                // Capture the shared intervention gate before the loop is moved
+                // behind the async mutex, so the slow cognitive loop reuses the
+                // exact same hot-reloadable gate as the fast loop.
+                let gate = control_loop.intervention_gate();
+                // M4-U6: adopt the loop's link-quality override Arc as the
+                // kernel's `simulated_link_quality`, so operator/API writes and
+                // the per-tick degradation read the *same* cell.
+                simulated_link_quality = control_loop.link_quality_override_handle();
+                (Some(Arc::new(tokio::sync::Mutex::new(control_loop))), gate)
+            } else {
+                (None, None)
+            };
+        // M3-U5: latest step report published by the background tick. Read by
+        // `GET /api/services/health` and the tactical dashboard to show live
+        // PSS/DCC/SMS intent counts and the embedded pipeline report. Held in
+        // `tokio::sync::RwLock` so the API task can await without blocking the
+        // single-threaded scheduler.
+        let latest_step_report: Arc<
+            tokio::sync::RwLock<Option<crate::platform_control::StepReport>>,
+        > = Arc::new(tokio::sync::RwLock::new(None));
+        // M4-U6: publish the freshest fleet picture so the federation engine
+        // and the dashboard see the same picture the cerebellum saw on the
+        // last tick.
+        let latest_fleet_snapshot: Arc<
+            tokio::sync::RwLock<Option<openfang_types::platform::FleetSnapshot>>,
+        > = Arc::new(tokio::sync::RwLock::new(None));
+        let platform_control_task = platform_control.as_ref().map(|control| {
+            let control = Arc::clone(control);
+            let tick_hz = config.platform.tick_hz.max(1.0);
+            let report_sink = Arc::clone(&latest_step_report);
+            let fleet_sink = Arc::clone(&latest_fleet_snapshot);
+            let observed_sink = Arc::clone(&observed_link_quality);
+            tokio::spawn(async move {
+                {
+                    let guard = control.lock().await;
+                    if let Err(e) = guard.connect().await {
+                        tracing::warn!(error = %e, "platform adapter connect on boot failed");
+                    }
+                }
+                let tick = std::time::Duration::from_secs_f64(1.0 / tick_hz);
+                loop {
+                    let (report, fleet, observed) = {
+                        let mut guard = control.lock().await;
+                        let report = guard.step().await;
+                        let fleet = guard.latest_fleet_snapshot();
+                        let observed = guard.observed_link_quality();
+                        (report, fleet, observed)
+                    };
+                    if let Some(q) = observed {
+                        if let Ok(mut sink) = observed_sink.write() {
+                            *sink = q;
+                        }
+                    }
+                    {
+                        // Best-effort: writes are short, and missing one report
+                        // is non-critical for the dashboard.
+                        let mut sink = report_sink.write().await;
+                        *sink = Some(report);
+                    }
+                    {
+                        let mut sink = fleet_sink.write().await;
+                        *sink = fleet;
+                    }
+                    tokio::time::sleep(tick).await;
+                }
+            })
+            .abort_handle()
+        });
+
+        // Slow cognitive loop: cognition → plan (optional LLM refine) →
+        // decompose → schedule → inject standing plan into the fast loop.
+        let platform_intents = Arc::new(openfang_runtime::planning::IntentInbox::new());
+        let label_resolutions =
+            Arc::new(openfang_runtime::planning::LabelResolutionRegistry::new());
+        let pending_missions =
+            Arc::new(openfang_runtime::mission_registry::PendingMissionRegistry::new());
+        let latest_cognitive_report: Arc<
+            tokio::sync::RwLock<Option<openfang_runtime::cognitive_pipeline::CognitiveReport>>,
+        > = Arc::new(tokio::sync::RwLock::new(None));
+        // Live control policy: single runtime source of truth shared by the slow
+        // loop and the API so a controlled-side change syncs without a restart.
+        let control_policy = Arc::new(std::sync::RwLock::new(config.platform.control_policy()));
+        let workflows = WorkflowEngine::new();
+        if let Some(path) = config.platform.workflows.definitions_path.clone() {
+            let primary = std::path::PathBuf::from(&path);
+            let fallback = std::path::PathBuf::from("tactical-assets")
+                .join("workflows")
+                .join(
+                    primary
+                        .file_name()
+                        .map(std::ffi::OsStr::to_owned)
+                        .unwrap_or_else(|| std::ffi::OsString::from(path.as_str())),
+                );
+            let chosen = if primary.exists() { primary } else { fallback };
+            match std::fs::read_to_string(&chosen) {
+                Ok(text) => match workflows.register_tactical_toml_sync(&text) {
+                    Ok(ids) => tracing::info!(
+                        path = %chosen.display(),
+                        count = ids.len(),
+                        "loaded tactical workflow definitions"
+                    ),
+                    Err(e) => tracing::warn!(
+                        path = %chosen.display(),
+                        "failed to parse tactical workflow definitions: {e}"
+                    ),
+                },
+                Err(e) => tracing::warn!(
+                    path = %chosen.display(),
+                    "failed to read tactical workflow definitions: {e}"
+                ),
+            }
+        }
+        let cognitive_loop_task = match (
+            platform_control.as_ref(),
+            platform_planning_gate,
+            config.platform.planning.enabled,
+        ) {
+            (Some(control), Some(gate), true) => {
+                let planning = config.platform.planning.clone();
+                let workflows_cfg = config.platform.workflows.clone();
+                let fleet_role = config.platform.fleet_role;
+                let control = Arc::clone(control);
+                let intents = Arc::clone(&platform_intents);
+                let label_resolutions = Arc::clone(&label_resolutions);
+                let pending_missions = Arc::clone(&pending_missions);
+                let audit = Arc::clone(&audit_log);
+                // DSL pipeline (single-platform autonomous): NL objective →
+                // StructuredIntent → MissionDsl → fast-loop intents. Built once
+                // per loop; the Play library is embedded at compile time.
+                let dsl_play_registry = openfang_runtime::play_registry::PlayRegistry::bundled();
+                let planning_llm_driver = if planning.dsl_llm_extract || planning.llm_refine {
+                    Some(crate::cognitive_loop::planning_driver_or_default(
+                        &planning,
+                        &config.default_model,
+                        Arc::clone(&driver),
+                    ))
+                } else {
+                    None
+                };
+                let planning_llm_model = planning.resolved_llm_model(&config.default_model);
+                let planning_llm_timeout =
+                    std::time::Duration::from_secs(planning.llm_timeout_secs.max(1));
+                let dsl_intent_driver: Option<
+                    Arc<dyn openfang_runtime::intent_extractor::IntentExtractDriver>,
+                > =
+                    planning.dsl_llm_extract.then(|| {
+                        Arc::new(
+                            openfang_runtime::intent_extractor::LlmIntentExtractDriver::new(
+                                Arc::clone(planning_llm_driver.as_ref().expect(
+                                    "planning_llm_driver set when dsl_llm_extract is enabled",
+                                )),
+                                planning_llm_model.clone(),
+                                planning_llm_timeout,
+                            )
+                            .with_doctrine(planning.dsl_doctrine_inject.then(|| {
+                                openfang_runtime::intent_extractor::mc_planning_doctrine()
+                                    .to_string()
+                            })),
+                        )
+                            as Arc<dyn openfang_runtime::intent_extractor::IntentExtractDriver>
+                    });
+                let dsl_own_platform_id = config.platform.own_platform_id.clone();
+                let latest_report = Arc::clone(&latest_cognitive_report);
+                // Brain → authorization registry: the slow loop may (config + ROE
+                // gated) write LLM-proposed fire authorizations.
+                let slow_loop_target_auth = Arc::clone(&target_authorizations);
+                let policy_holder = Arc::clone(&control_policy);
+                let workflows = workflows.clone();
+                let base = crate::cognitive_loop::base_mission(&config.platform);
+                let mut pipeline =
+                    openfang_runtime::cognitive_pipeline::CognitivePipeline::new(gate)
+                        .with_control_policy(config.platform.control_policy());
+                let refiner: Option<Arc<dyn openfang_runtime::planning::MissionPlanRefiner>> =
+                    if planning.llm_refine {
+                        Some(Arc::new(crate::cognitive_loop::LlmMissionPlanRefiner::new(
+                            Arc::clone(
+                                planning_llm_driver
+                                    .as_ref()
+                                    .expect("planning_llm_driver set when llm_refine is enabled"),
+                            ),
+                            planning_llm_model,
+                            planning_llm_timeout,
+                            Arc::clone(&audit_log),
+                        )))
+                    } else {
+                        None
+                    };
+                let label_resolver =
+                    openfang_runtime::planning::DeterministicLabelResolver::default();
+                let interval = std::time::Duration::from_secs_f64(planning.interval_secs.max(0.1));
+                // Brain decision layer: which tactical workflows fire each cycle
+                // (own-scope locally; formation-scope only when fleet_role=lead).
+                let mut trigger_mgr =
+                    openfang_runtime::workflow_trigger::WorkflowTriggerManager::new(
+                        &workflows_cfg,
+                        fleet_role,
+                    );
+                // Brain → cerebellum contingency closure: evaluates the mission's
+                // pre-planned contingency triggers each cycle and (de)activates DCC
+                // reflex rules. Diff state (last link/roe/health) lives inside the
+                // orchestrator across cycles.
+                let contingency_orch =
+                    openfang_runtime::mission_config::MissionConfigOrchestrator::new();
+                Some(
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(interval).await;
+                            let (snapshot, fused_tracks) = {
+                                let guard = control.lock().await;
+                                let snap = guard.latest_snapshot().cloned();
+                                // 回灌: hand the unified SMS fusion picture to the
+                                // slow-loop WMS target allocation so weapon tasking
+                                // reasons about the same Kalman-confirmed threats the
+                                // cerebellum services act on.
+                                let fused = guard
+                                    .latest_fusion()
+                                    .map(|f| f.fused_tracks.clone())
+                                    .unwrap_or_default();
+                                (snap, fused)
+                            };
+                            let Some(snapshot) = snapshot else {
+                                continue;
+                            };
+                            // Re-read the live control policy each cycle so changing
+                            // the controlled side (config reload) takes effect without
+                            // restarting the daemon.
+                            let current_policy = policy_holder
+                                .read()
+                                .map(|p| p.clone())
+                                .unwrap_or_else(|_| openfang_types::config::PlatformControlPolicy::default());
+                            pipeline.apply_control_policy(current_policy.clone());
+                            let mut intent = intents.peek_next();
+                            if planning.label_resolve {
+                                if let Some(it) = intent.as_ref() {
+                                    if !it.priority_labels.is_empty() {
+                                        let resolutions = label_resolver.resolve(
+                                            openfang_runtime::planning::LabelResolveContext {
+                                                snapshot: &snapshot,
+                                                labels: &it.priority_labels,
+                                                control_policy: &current_policy,
+                                            },
+                                        );
+                                        match planning.label_resolution_mode {
+                                            openfang_types::config::LabelResolutionMode::Confirm => {
+                                                if !label_resolutions
+                                                    .has_pending_for_intent(&it.id)
+                                                {
+                                                    let resolution = label_resolutions.submit(
+                                                        it,
+                                                        resolutions,
+                                                        snapshot.timestamp,
+                                                    );
+                                                    let _ = audit.record(
+                                                        "planner",
+                                                        openfang_runtime::audit::AuditAction::ConfigChange,
+                                                        format!(
+                                                            "semantic label resolution pending: {}",
+                                                            resolution.id
+                                                        ),
+                                                        &it.id,
+                                                    );
+                                                }
+                                                // Hold this intent until the operator confirms or dismisses the resolution.
+                                                intent = None;
+                                            }
+                                            openfang_types::config::LabelResolutionMode::AutoGate => {
+                                                let resolved =
+                                                    openfang_runtime::planning::LabelResolution::selected_track_ids(
+                                                        &resolutions,
+                                                    );
+                                                if let Some(updated) =
+                                                    intents.merge_resolved_front(&it.id, &resolved)
+                                                {
+                                                    let _ = audit.record(
+                                                        "planner",
+                                                        openfang_runtime::audit::AuditAction::ConfigChange,
+                                                        format!(
+                                                            "semantic labels resolved to tracks: {}",
+                                                            updated.priority_tracks.join(",")
+                                                        ),
+                                                        &it.id,
+                                                    );
+                                                }
+                                                intent = intents.peek_next();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // DSL pipeline: compile a freeform NL objective into a
+                            // Mission DSL for the own platform. In `Confirm` mode the
+                            // compiled mission is held for operator approval; in
+                            // `AutoGate` mode its functions are lowered to fast-loop
+                            // candidate intents and submitted immediately. Either way
+                            // the originating intent is consumed (DSL now owns it) so
+                            // the threat-driven baseline pipeline runs without it.
+                            if planning.dsl_compile {
+                                if let Some(it) = intent.clone() {
+                                    let objective = commander_intent_compile_text(&it);
+                                    if !objective.is_empty() {
+                                        let params = openfang_runtime::mission_compiler::CompileParams {
+                                            default_standoff_m: planning.default_standoff_m,
+                                            pid_required: planning.pid_required,
+                                            provenance: format!("intent:{}", it.id),
+                                            home: None,
+                                            speed_ms: None,
+                                            max_speed_ms: openfang_types::umaa::PlatformLimits::default()
+                                                .max_speed_ms,
+                                        };
+                                        let compiled = openfang_runtime::mission_compiler::compile_objective_with_semantics(
+                                            &objective,
+                                            &snapshot,
+                                            &current_policy,
+                                            &dsl_play_registry,
+                                            &params,
+                                            dsl_intent_driver.as_deref(),
+                                            planning.confidence_threshold,
+                                        )
+                                        .await;
+                                        let si = compiled.structured_intent;
+                                        let mission_ready = compiled.mission.kind
+                                            != openfang_types::mission_dsl::MissionKind::Unknown
+                                            && (if compiled.mission.kind.is_lethal_class() {
+                                                compiled.mission.has_lethal_function()
+                                            } else {
+                                                true
+                                            });
+                                        let confident = si.confidence
+                                            >= planning.confidence_threshold
+                                            && mission_ready;
+                                        if !confident {
+                                            let _ = audit.record(
+                                                "planner",
+                                                openfang_runtime::audit::AuditAction::ConfigChange,
+                                                format!(
+                                                    "DSL compile rejected: kind={} si_conf={:.2} mission_conf={:.2} functions={} fallback={:?}",
+                                                    si.kind.label(),
+                                                    si.confidence,
+                                                    compiled.mission.confidence,
+                                                    compiled.mission.functions.len(),
+                                                    si.fallback_reason,
+                                                ),
+                                                &it.id,
+                                            );
+                                        }
+                                        if confident {
+                                            let dsl = compiled.mission;
+                                            match planning.dsl_mode {
+                                                openfang_types::config::DslCompileMode::Confirm => {
+                                                    if !pending_missions
+                                                        .has_pending_for_intent(&it.id)
+                                                    {
+                                                        let pm = pending_missions.submit(
+                                                            dsl,
+                                                            Some(it.id.clone()),
+                                                            snapshot.timestamp,
+                                                        );
+                                                        let _ = audit.record(
+                                                            "planner",
+                                                            openfang_runtime::audit::AuditAction::ConfigChange,
+                                                            format!(
+                                                                "DSL mission compiled, pending confirm: {} ({})",
+                                                                pm.id,
+                                                                pm.mission.kind.label()
+                                                            ),
+                                                            &it.id,
+                                                        );
+                                                    }
+                                                }
+                                                openfang_types::config::DslCompileMode::AutoGate => {
+                                                    if let Some(own) = snapshot
+                                                        .platforms
+                                                        .iter()
+                                                        .find(|p| p.id == dsl_own_platform_id)
+                                                    {
+                                                        let mut mission_scheduler =
+                                                            openfang_runtime::mission_scheduler::MissionScheduler::new(dsl.clone());
+                                                        let plan = mission_scheduler.tick(
+                                                            &snapshot,
+                                                            own,
+                                                            snapshot.timestamp,
+                                                        );
+                                                        let emitted = plan.intents.len();
+                                                        let held = plan.held.len();
+                                                        let mut guard = control.lock().await;
+                                                        let mms_synced =
+                                                            guard.sync_mms_from_structured_intent(&si);
+                                                        // Maneuver lane unification: when MMS has taken
+                                                        // ownership of the maneuver (mms_synced), drop the
+                                                        // DSL lane's duplicate motion intents so a single
+                                                        // deterministic source (MMS) drives heading/speed/
+                                                        // route. Weapon/sensor/posture intents still flow
+                                                        // through the DSL function lane.
+                                                        let mut maneuver_skipped = 0usize;
+                                                        let submit_at = guard.now_secs();
+                                                        for mut ci in plan.intents {
+                                                            if mms_synced
+                                                                && is_maneuver_command(&ci.command)
+                                                            {
+                                                                maneuver_skipped += 1;
+                                                                continue;
+                                                            }
+                                                            ci.issued_at = submit_at;
+                                                            guard.submit_intent(ci);
+                                                        }
+                                                        drop(guard);
+                                                        let _ = audit.record(
+                                                            "planner",
+                                                            openfang_runtime::audit::AuditAction::ConfigChange,
+                                                            format!(
+                                                                "DSL mission auto-gated: {emitted} intents, {held} held, mms_synced={mms_synced}, maneuver_skipped={maneuver_skipped}"
+                                                            ),
+                                                            &it.id,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            // Consume the freeform intent; the DSL lane owns it now.
+                                            intents.ack_next(&it.id);
+                                            intent = None;
+                                        }
+                                    }
+                                }
+                            }
+
+                            let intent_id = intent.as_ref().map(|intent| intent.id.clone());
+                            let workflow_command =
+                                intent.as_ref().map(|intent| intent.objective.clone());
+                            let mut report = pipeline
+                                .run_once_refined_with_fused(
+                                    &snapshot,
+                                    base.clone(),
+                                    intent,
+                                    refiner.as_deref(),
+                                    &fused_tracks,
+                                )
+                                .await;
+                            // Brain → cerebellum: evaluate workflow triggers from
+                            // this cycle's assessment and adopt the implied own
+                            // platform role (fans posture out to the lanes).
+                            if trigger_mgr.is_active() {
+                                let now_ts = report.assessment.timestamp;
+                                let fired = trigger_mgr.evaluate(
+                                    now_ts,
+                                    &report.assessment,
+                                    workflow_command.as_deref(),
+                                );
+                                for f in &fired {
+                                    if let Some(workflow) =
+                                        workflows.find_workflow_by_name(&f.workflow).await
+                                    {
+                                        let input = serde_json::json!({
+                                            "trigger": f,
+                                            "assessment": report.assessment,
+                                            "mission": report.mission,
+                                        })
+                                        .to_string();
+                                        if let Some(run_id) =
+                                            workflows.create_run(workflow.id, input).await
+                                        {
+                                            let _ = audit.record(
+                                                "workflow",
+                                                openfang_runtime::audit::AuditAction::ConfigChange,
+                                                format!("fired {} -> run {}", f.workflow, run_id),
+                                                &f.reason,
+                                            );
+                                        } else {
+                                            let _ = audit.record(
+                                                "workflow",
+                                                openfang_runtime::audit::AuditAction::CapabilityCheck,
+                                                format!("failed to create run for {}", f.workflow),
+                                                "workflow not found",
+                                            );
+                                        }
+                                    }
+                                }
+                                // Own-scope: adopt the implied own-platform role.
+                                if let Some(role) = fired
+                                    .iter()
+                                    .filter(|f| {
+                                        f.scope == openfang_types::config::WorkflowScope::Own
+                                    })
+                                    .find_map(|f| {
+                                        openfang_runtime::workflow_trigger::workflow_to_role(
+                                            &f.workflow,
+                                        )
+                                    })
+                                {
+                                    let mut guard = control.lock().await;
+                                    guard.set_own_role(role);
+                                }
+                                // Formation-scope: only a lead distributes member
+                                // roles over OFP/A2A (capability-gated).
+                                if fleet_role.is_lead() {
+                                    for f in fired.iter().filter(|f| {
+                                        f.scope
+                                            == openfang_types::config::WorkflowScope::Formation
+                                    }) {
+                                        let assignments = {
+                                            let mut guard = control.lock().await;
+                                            guard.assign_formation_roles(&f.workflow, now_ts)
+                                        };
+                                        for a in &assignments {
+                                            audit.record(
+                                                "fma",
+                                                openfang_runtime::audit::AuditAction::ConfigChange,
+                                                format!(
+                                                    "formation {}: {} → {:?} ({})",
+                                                    f.workflow, a.member_id, a.role, a.reason
+                                                ),
+                                                &report.mission.mission_id,
+                                            );
+                                        }
+                                    }
+                                }
+                                report.fired_workflows = fired;
+                            }
+                            // Publish the latest report for the tactical console
+                            // before any field is moved into the fast loop.
+                            *latest_report.write().await = Some(report.clone());
+                            if report.pending_approval_id.is_none()
+                                && report.denial_reason.is_none()
+                            {
+                                if let Some(intent_id) = intent_id.as_deref() {
+                                    intents.ack_next(intent_id);
+                                }
+                                // Approved: publish the standing plan (may be
+                                // empty to stand down when no threats remain), and
+                                // read the live ROE while holding the lock.
+                                let roe = {
+                                    let mut guard = control.lock().await;
+                                    let roe = guard.weapon_release_level();
+                                    guard.set_active_plan(report.intents);
+                                    roe
+                                };
+                                // Brain fire-authorization proposals: honor them
+                                // ONLY when config opts in AND ROE is weapons-free;
+                                // otherwise record as proposals for human confirm.
+                                // Either way the CommandGate + ROE still rule.
+                                if !report.authorization_proposals.is_empty() {
+                                    let auto = planning.llm_target_authorization
+                                        && roe
+                                            == openfang_types::umaa::WeaponReleaseLevel::WeaponsFree;
+                                    for proposal in &report.authorization_proposals {
+                                        if auto {
+                                            slow_loop_target_auth.authorize(
+                                                proposal.platform_id.clone(),
+                                                proposal.track_id.clone(),
+                                                "llm:planner",
+                                                report.assessment.timestamp,
+                                            );
+                                            let _ = audit.record(
+                                                "planner",
+                                                openfang_runtime::audit::AuditAction::ConfigChange,
+                                                format!(
+                                                    "LLM authorized fire target {}:{} (weapons_free)",
+                                                    proposal.platform_id, proposal.track_id
+                                                ),
+                                                &report.mission.mission_id,
+                                            );
+                                        } else {
+                                            let _ = audit.record(
+                                                "planner",
+                                                openfang_runtime::audit::AuditAction::CapabilityCheck,
+                                                format!(
+                                                    "LLM proposed fire authorization {}:{} — awaiting human/ROE",
+                                                    proposal.platform_id, proposal.track_id
+                                                ),
+                                                &report.mission.mission_id,
+                                            );
+                                        }
+                                    }
+                                }
+                            } else if let Some(pending) = &report.pending_approval_id {
+                                audit.record(
+                                    "planner",
+                                    openfang_runtime::audit::AuditAction::ConfigChange,
+                                    format!("mission plan held for approval: {pending}"),
+                                    &report.mission.mission_id,
+                                );
+                            } else if let Some(reason) = &report.denial_reason {
+                                if let Some(intent_id) = intent_id.as_deref() {
+                                    intents.ack_next(intent_id);
+                                }
+                                audit.record(
+                                    "planner",
+                                    openfang_runtime::audit::AuditAction::ConfigChange,
+                                    format!("mission plan denied: {reason}"),
+                                    &report.mission.mission_id,
+                                );
+                            }
+
+                            // Brain → cerebellum: end-of-cycle contingency
+                            // evaluation. Sync the active-mission ROE to the live
+                            // level so RoeChange triggers compare against reality;
+                            // snapshot-derived triggers (comm/fuel/health/platform)
+                            // are unaffected. Fired DCC-rule actions (de)activate
+                            // reflex rules; other actions are audited for now.
+                            if !base.contingency_plans.is_empty() {
+                                let roe_level = { control.lock().await.weapon_release_level() };
+                                let mut mission_view = base.clone();
+                                mission_view.roe.weapon_release_authority = roe_level;
+                                contingency_orch.activate(mission_view);
+                                if let openfang_runtime::mission_config::ContingencyOutcome::Fired(
+                                    actions,
+                                ) = contingency_orch.evaluate(&snapshot)
+                                {
+                                    let mut guard = control.lock().await;
+                                    for action in &actions {
+                                        use openfang_types::umaa::ContingencyAction as Ca;
+                                        match action {
+                                            Ca::DccRuleEnable { rule_name } => {
+                                                let found =
+                                                    guard.set_dcc_rule_enabled(rule_name, true);
+                                                let _ = audit.record(
+                                                    "contingency",
+                                                    openfang_runtime::audit::AuditAction::ConfigChange,
+                                                    format!(
+                                                        "DCC rule '{rule_name}' enabled by contingency (matched={found})"
+                                                    ),
+                                                    &report.mission.mission_id,
+                                                );
+                                            }
+                                            Ca::DccRuleDisable { rule_name } => {
+                                                let found =
+                                                    guard.set_dcc_rule_enabled(rule_name, false);
+                                                let _ = audit.record(
+                                                    "contingency",
+                                                    openfang_runtime::audit::AuditAction::ConfigChange,
+                                                    format!(
+                                                        "DCC rule '{rule_name}' disabled by contingency (matched={found})"
+                                                    ),
+                                                    &report.mission.mission_id,
+                                                );
+                                            }
+                                            Ca::SensorSetMode { sensor_id, mode } => {
+                                                let platform_id = snapshot
+                                                    .platforms
+                                                    .iter()
+                                                    .find(|platform| {
+                                                        platform
+                                                            .onboard_sensors
+                                                            .iter()
+                                                            .any(|sensor| sensor.sensor_id == *sensor_id)
+                                                    })
+                                                    .map(|platform| platform.id.clone())
+                                                    .or_else(|| {
+                                                        snapshot.platforms.first().map(|p| p.id.clone())
+                                                    })
+                                                    .unwrap_or_else(|| "self".into());
+                                                guard.submit_intent(openfang_types::tactical::CandidateIntent::new(
+                                                    openfang_types::platform::PlatformCommand::SensorSetMode {
+                                                        platform_id,
+                                                        sensor_id: sensor_id.clone(),
+                                                        mode: mode.clone(),
+                                                    },
+                                                    openfang_types::tactical::CommandPriority::High,
+                                                    openfang_types::tactical::IntentSource::Dcc {
+                                                        rule_name: "contingency:sensor_set_mode".into(),
+                                                    },
+                                                    snapshot.timestamp,
+                                                    format!("contingency sensor {sensor_id} set {mode}"),
+                                                ));
+                                            }
+                                            Ca::SensorOffAll => {
+                                                for platform in &snapshot.platforms {
+                                                    for sensor in &platform.onboard_sensors {
+                                                        guard.submit_intent(openfang_types::tactical::CandidateIntent::new(
+                                                            openfang_types::platform::PlatformCommand::SensorOff {
+                                                                platform_id: platform.id.clone(),
+                                                                sensor_id: sensor.sensor_id.clone(),
+                                                            },
+                                                            openfang_types::tactical::CommandPriority::High,
+                                                            openfang_types::tactical::IntentSource::Dcc {
+                                                                rule_name: "contingency:sensor_off_all".into(),
+                                                            },
+                                                            snapshot.timestamp,
+                                                            format!(
+                                                                "contingency sensor {} off",
+                                                                sensor.sensor_id
+                                                            ),
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                            other => {
+                                                let _ = audit.record(
+                                                    "contingency",
+                                                    openfang_runtime::audit::AuditAction::CapabilityCheck,
+                                                    format!(
+                                                        "contingency action not auto-actuated in slow loop: {other:?}"
+                                                    ),
+                                                    &report.mission.mission_id,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    })
+                    .abort_handle(),
+                )
+            }
+            _ => None,
+        };
+
         // Initialize binding/broadcast/auto-reply from config
         let initial_bindings = config.bindings.clone();
         let initial_broadcast = config.broadcast.clone();
@@ -897,12 +1925,12 @@ impl OpenFangKernel {
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
             supervisor,
-            workflows: WorkflowEngine::new(),
+            workflows,
             triggers: TriggerEngine::new(),
             background,
-            audit_log: Arc::new(AuditLog::new()),
+            audit_log,
             metering,
-            default_driver: driver,
+            default_driver: Arc::new(std::sync::RwLock::new(driver)),
             wasm_sandbox,
             auth,
             model_catalog: std::sync::RwLock::new(model_catalog),
@@ -918,13 +1946,25 @@ impl OpenFangKernel {
             tts_engine,
             pairing,
             embedding_driver,
-            hand_registry,
-            extension_registry: std::sync::RwLock::new(extension_registry),
-            extension_health,
             effective_mcp_servers: std::sync::RwLock::new(all_mcp_servers),
-            delivery_tracker: DeliveryTracker::new(),
             cron_scheduler,
             approval_manager,
+            platform_registry,
+            platform_control,
+            target_authorizations,
+            mission_approvals,
+            platform_control_task,
+            autonomy_override: Arc::new(std::sync::RwLock::new(None)),
+            latest_step_report,
+            latest_fleet_snapshot,
+            simulated_link_quality,
+            observed_link_quality,
+            platform_intents,
+            label_resolutions,
+            pending_missions,
+            latest_cognitive_report,
+            control_policy,
+            cognitive_loop_task,
             bindings: std::sync::Mutex::new(initial_bindings),
             broadcast: initial_broadcast,
             auto_reply_engine,
@@ -934,7 +1974,7 @@ impl OpenFangKernel {
             peer_node: None,
             booted_at: std::time::Instant::now(),
             whatsapp_gateway_pid: Arc::new(std::sync::Mutex::new(None)),
-            channel_adapters: dashmap::DashMap::new(),
+            llamacpp_server_pid: Arc::new(std::sync::Mutex::new(llamacpp_pid)),
             default_model_override: std::sync::RwLock::new(None),
             self_handle: OnceLock::new(),
         };
@@ -964,11 +2004,16 @@ impl OpenFangKernel {
                                     Ok(disk_manifest) => {
                                         // Compare key fields to detect changes
                                         let changed = disk_manifest.name != entry.manifest.name
-                                            || disk_manifest.description != entry.manifest.description
-                                            || disk_manifest.model.system_prompt != entry.manifest.model.system_prompt
-                                            || disk_manifest.model.provider != entry.manifest.model.provider
-                                            || disk_manifest.model.model != entry.manifest.model.model
-                                            || disk_manifest.capabilities.tools != entry.manifest.capabilities.tools;
+                                            || disk_manifest.description
+                                                != entry.manifest.description
+                                            || disk_manifest.model.system_prompt
+                                                != entry.manifest.model.system_prompt
+                                            || disk_manifest.model.provider
+                                                != entry.manifest.model.provider
+                                            || disk_manifest.model.model
+                                                != entry.manifest.model.model
+                                            || disk_manifest.capabilities.tools
+                                                != entry.manifest.capabilities.tools;
                                         if changed {
                                             info!(
                                                 agent = %name,
@@ -1049,10 +2094,15 @@ impl OpenFangKernel {
                                 restored_entry.manifest.model.model = dm.model.clone();
                             }
                             if !dm.api_key_env.is_empty() {
-                                restored_entry.manifest.model.api_key_env = Some(dm.api_key_env.clone());
+                                restored_entry.manifest.model.api_key_env =
+                                    Some(dm.api_key_env.clone());
                             }
                             if dm.base_url.is_some() {
-                                restored_entry.manifest.model.base_url.clone_from(&dm.base_url);
+                                restored_entry
+                                    .manifest
+                                    .model
+                                    .base_url
+                                    .clone_from(&dm.base_url);
                             }
                         }
                     }
@@ -1187,13 +2237,21 @@ impl OpenFangKernel {
             manifest.model.model = normalized;
         }
 
+        // Prompt-file override: if `agents/<name>/SYSTEM_PROMPT.md` exists on disk, it is
+        // the authoritative system prompt (editable + hot-reloadable). Falls back to the
+        // inline manifest prompt when absent. This makes every agent prompt-file driven.
+        if let Some(prompt) = self.load_prompt_file(&name) {
+            manifest.model.system_prompt = prompt;
+        }
+
         // Apply global budget defaults to agent resource quotas
         apply_budget_defaults(&self.config.budget, &mut manifest.resources);
 
         // Create workspace directory for the agent (name-based, so SOUL.md survives recreation)
-        let workspace_dir = manifest.workspace.clone().unwrap_or_else(|| {
-            self.config.effective_workspaces_dir().join(&name)
-        });
+        let workspace_dir = manifest
+            .workspace
+            .clone()
+            .unwrap_or_else(|| self.config.effective_workspaces_dir().join(&name));
         ensure_workspace(&workspace_dir)?;
         if manifest.generate_identity_files {
             generate_identity_files(&workspace_dir, &manifest);
@@ -1616,7 +2674,12 @@ impl OpenFangKernel {
                     None
                 },
                 peer_agents,
-                current_date: Some(chrono::Local::now().format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)").to_string()),
+                current_date: Some(
+                    chrono::Local::now()
+                        .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
+                        .to_string(),
+                ),
+                autonomy_profile: self.active_autonomy_brief(&manifest),
             };
             manifest.model.system_prompt =
                 openfang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -2085,7 +3148,12 @@ impl OpenFangKernel {
                     None
                 },
                 peer_agents,
-                current_date: Some(chrono::Local::now().format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)").to_string()),
+                current_date: Some(
+                    chrono::Local::now()
+                        .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
+                        .to_string(),
+                ),
+                autonomy_profile: self.active_autonomy_brief(&manifest),
             };
             manifest.model.system_prompt =
                 openfang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -2509,15 +3577,11 @@ impl OpenFangKernel {
     /// Switch an agent's model.
     pub fn set_agent_model(&self, agent_id: AgentId, model: &str) -> KernelResult<()> {
         // Resolve provider from model catalog so switching models also switches provider
-        let resolved_provider = self
-            .model_catalog
-            .read()
-            .ok()
-            .and_then(|catalog| {
-                catalog
-                    .find_model(model)
-                    .map(|entry| entry.provider.clone())
-            });
+        let resolved_provider = self.model_catalog.read().ok().and_then(|catalog| {
+            catalog
+                .find_model(model)
+                .map(|entry| entry.provider.clone())
+        });
 
         // If catalog lookup failed, try to infer provider from model name prefix
         let provider = resolved_provider.or_else(|| infer_provider_from_model(model));
@@ -2643,6 +3707,108 @@ impl OpenFangKernel {
             blocklist = ?blocklist,
             "Agent tool filters updated"
         );
+        Ok(())
+    }
+
+    // -- Prompt + skill driven agents: file-backed, hot-reloadable, persistable --
+
+    /// Path to an agent's on-disk directory under the OpenFang home (`agents/<name>/`).
+    fn agent_dir(&self, agent_name: &str) -> std::path::PathBuf {
+        self.config.home_dir.join("agents").join(agent_name)
+    }
+
+    /// Load an agent's `SYSTEM_PROMPT.md` from disk if present and non-empty.
+    /// This is the authoritative, user-editable system prompt for the agent.
+    fn load_prompt_file(&self, agent_name: &str) -> Option<String> {
+        let path = self.agent_dir(agent_name).join("SYSTEM_PROMPT.md");
+        let content = std::fs::read_to_string(&path).ok()?;
+        if content.trim().is_empty() {
+            return None;
+        }
+        info!(agent = %agent_name, path = %path.display(), "Loaded system prompt from SYSTEM_PROMPT.md");
+        Some(content)
+    }
+
+    /// Update an agent's system prompt live (takes effect on next message) and
+    /// persist the change to the SQLite agent store so it survives restarts.
+    pub fn set_agent_system_prompt(&self, agent_id: AgentId, prompt: String) -> KernelResult<()> {
+        self.registry
+            .update_system_prompt(agent_id, prompt)
+            .map_err(KernelError::OpenFang)?;
+        if let Some(entry) = self.registry.get(agent_id) {
+            let _ = self.memory.save_agent(&entry);
+        }
+        info!(agent_id = %agent_id, "Agent system prompt updated");
+        Ok(())
+    }
+
+    /// Reload an agent's prompt + skills from disk (`agent.toml` + `SYSTEM_PROMPT.md`)
+    /// and apply them to the live agent. Lets operators edit the files then hot-reload
+    /// without restarting the daemon. Returns a short summary of what changed.
+    pub fn reload_agent_from_disk(&self, agent_id: AgentId) -> KernelResult<String> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::OpenFang(OpenFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        let name = entry.name.clone();
+        let mut changes: Vec<String> = Vec::new();
+
+        // Manifest (agent.toml) — re-read skills allowlist when present.
+        let toml_path = self.agent_dir(&name).join("agent.toml");
+        if let Ok(content) = std::fs::read_to_string(&toml_path) {
+            if let Ok(m) = toml::from_str::<AgentManifest>(&content) {
+                if m.skills != entry.manifest.skills {
+                    // Best-effort: skip unknown skills rather than failing the reload.
+                    if self.set_agent_skills(agent_id, m.skills.clone()).is_ok() {
+                        changes.push(format!("skills={:?}", m.skills));
+                    }
+                }
+            }
+        }
+
+        // Prompt (SYSTEM_PROMPT.md is authoritative when present).
+        if let Some(prompt) = self.load_prompt_file(&name) {
+            if prompt != entry.manifest.model.system_prompt {
+                self.set_agent_system_prompt(agent_id, prompt)?;
+                changes.push("system_prompt".to_string());
+            }
+        }
+
+        if changes.is_empty() {
+            Ok("no on-disk changes detected".to_string())
+        } else {
+            Ok(format!("reloaded from disk: {}", changes.join(", ")))
+        }
+    }
+
+    /// Persist an agent's current in-memory manifest + prompt back to disk so edits
+    /// made via the API survive a restart. Writes `SYSTEM_PROMPT.md` (authoritative
+    /// prompt) and `agent.toml` (manifest) under `agents/<name>/`.
+    pub fn persist_agent_to_disk(&self, agent_id: AgentId) -> KernelResult<()> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::OpenFang(OpenFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        let dir = self.agent_dir(&entry.name);
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            KernelError::OpenFang(OpenFangError::Internal(format!("create agent dir: {e}")))
+        })?;
+
+        let prompt = entry.manifest.model.system_prompt.clone();
+        if !prompt.trim().is_empty() {
+            std::fs::write(dir.join("SYSTEM_PROMPT.md"), &prompt).map_err(|e| {
+                KernelError::OpenFang(OpenFangError::Internal(format!(
+                    "write SYSTEM_PROMPT.md: {e}"
+                )))
+            })?;
+        }
+
+        let toml_str = toml::to_string_pretty(&entry.manifest).map_err(|e| {
+            KernelError::OpenFang(OpenFangError::Internal(format!("serialize manifest: {e}")))
+        })?;
+        std::fs::write(dir.join("agent.toml"), toml_str).map_err(|e| {
+            KernelError::OpenFang(OpenFangError::Internal(format!("write agent.toml: {e}")))
+        })?;
+
+        info!(agent_id = %agent_id, dir = %dir.display(), "Agent manifest + prompt persisted to disk");
         Ok(())
     }
 
@@ -2847,206 +4013,6 @@ impl OpenFangKernel {
         Ok(())
     }
 
-    // ─── Hand lifecycle ─────────────────────────────────────────────────────
-
-    /// Activate a hand: check requirements, create instance, spawn agent.
-    pub fn activate_hand(
-        &self,
-        hand_id: &str,
-        config: std::collections::HashMap<String, serde_json::Value>,
-    ) -> KernelResult<openfang_hands::HandInstance> {
-        use openfang_hands::HandError;
-
-        let def = self
-            .hand_registry
-            .get_definition(hand_id)
-            .ok_or_else(|| {
-                KernelError::OpenFang(OpenFangError::AgentNotFound(format!(
-                    "Hand not found: {hand_id}"
-                )))
-            })?
-            .clone();
-
-        // Create the instance in the registry
-        let instance = self
-            .hand_registry
-            .activate(hand_id, config)
-            .map_err(|e| match e {
-                HandError::AlreadyActive(id) => KernelError::OpenFang(OpenFangError::Internal(
-                    format!("Hand already active: {id}"),
-                )),
-                other => KernelError::OpenFang(OpenFangError::Internal(other.to_string())),
-            })?;
-
-        // Build an agent manifest from the hand definition.
-        // If the hand declares provider/model as "default", inherit the kernel's configured LLM.
-        let hand_provider = if def.agent.provider == "default" {
-            self.config.default_model.provider.clone()
-        } else {
-            def.agent.provider.clone()
-        };
-        let hand_model = if def.agent.model == "default" {
-            self.config.default_model.model.clone()
-        } else {
-            def.agent.model.clone()
-        };
-
-        let mut manifest = AgentManifest {
-            name: def.agent.name.clone(),
-            description: def.agent.description.clone(),
-            module: def.agent.module.clone(),
-            model: ModelConfig {
-                provider: hand_provider,
-                model: hand_model,
-                max_tokens: def.agent.max_tokens,
-                temperature: def.agent.temperature,
-                system_prompt: def.agent.system_prompt.clone(),
-                api_key_env: def.agent.api_key_env.clone(),
-                base_url: def.agent.base_url.clone(),
-            },
-            capabilities: ManifestCapabilities {
-                tools: def.tools.clone(),
-                ..Default::default()
-            },
-            tags: vec![
-                format!("hand:{hand_id}"),
-                format!("hand_instance:{}", instance.instance_id),
-            ],
-            autonomous: def.agent.max_iterations.map(|max_iter| AutonomousConfig {
-                max_iterations: max_iter,
-                ..Default::default()
-            }),
-            // Autonomous hands must run in Continuous mode so the background loop picks them up.
-            // Reactive (default) only fires on incoming messages, so autonomous hands would be inert.
-            schedule: if def.agent.max_iterations.is_some() {
-                ScheduleMode::Continuous {
-                    check_interval_secs: 60,
-                }
-            } else {
-                ScheduleMode::default()
-            },
-            skills: def.skills.clone(),
-            mcp_servers: def.mcp_servers.clone(),
-            // Hands are curated packages — if they declare shell_exec, grant full exec access
-            exec_policy: if def.tools.iter().any(|t| t == "shell_exec") {
-                Some(openfang_types::config::ExecPolicy {
-                    mode: openfang_types::config::ExecSecurityMode::Full,
-                    timeout_secs: 300, // hands may run long commands (ffmpeg, yt-dlp)
-                    no_output_timeout_secs: 120,
-                    ..Default::default()
-                })
-            } else {
-                None
-            },
-            ..Default::default()
-        };
-
-        // Resolve hand settings → prompt block + env vars
-        let resolved = openfang_hands::resolve_settings(&def.settings, &instance.config);
-        if !resolved.prompt_block.is_empty() {
-            manifest.model.system_prompt = format!(
-                "{}\n\n---\n\n{}",
-                manifest.model.system_prompt, resolved.prompt_block
-            );
-        }
-        // Collect env vars from settings + from requires (api_key/env_var requirements)
-        let mut allowed_env = resolved.env_vars;
-        for req in &def.requires {
-            match req.requirement_type {
-                openfang_hands::RequirementType::ApiKey
-                | openfang_hands::RequirementType::EnvVar => {
-                    if !req.check_value.is_empty() && !allowed_env.contains(&req.check_value) {
-                        allowed_env.push(req.check_value.clone());
-                    }
-                }
-                _ => {}
-            }
-        }
-        if !allowed_env.is_empty() {
-            manifest.metadata.insert(
-                "hand_allowed_env".to_string(),
-                serde_json::to_value(&allowed_env).unwrap_or_default(),
-            );
-        }
-
-        // Inject skill content into system prompt
-        if let Some(ref skill_content) = def.skill_content {
-            manifest.model.system_prompt = format!(
-                "{}\n\n---\n\n## Reference Knowledge\n\n{}",
-                manifest.model.system_prompt, skill_content
-            );
-        }
-
-        // If an agent with this hand's name already exists, remove it first
-        let existing = self.registry.list().into_iter().find(|e| e.name == def.agent.name);
-        if let Some(old) = existing {
-            info!(agent = %old.name, id = %old.id, "Removing existing hand agent for reactivation");
-            let _ = self.kill_agent(old.id);
-        }
-
-        // Spawn the agent
-        let agent_id = self.spawn_agent(manifest)?;
-
-        // Link agent to instance
-        self.hand_registry
-            .set_agent(instance.instance_id, agent_id)
-            .map_err(|e| KernelError::OpenFang(OpenFangError::Internal(e.to_string())))?;
-
-        info!(
-            hand = %hand_id,
-            instance = %instance.instance_id,
-            agent = %agent_id,
-            "Hand activated with agent"
-        );
-
-        // Return instance with agent set
-        Ok(self
-            .hand_registry
-            .get_instance(instance.instance_id)
-            .unwrap_or(instance))
-    }
-
-    /// Deactivate a hand: kill agent and remove instance.
-    pub fn deactivate_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
-        let instance = self
-            .hand_registry
-            .deactivate(instance_id)
-            .map_err(|e| KernelError::OpenFang(OpenFangError::Internal(e.to_string())))?;
-
-        if let Some(agent_id) = instance.agent_id {
-            if let Err(e) = self.kill_agent(agent_id) {
-                warn!(agent = %agent_id, error = %e, "Failed to kill hand agent (may already be dead)");
-            }
-        } else {
-            // Fallback: if agent_id was never set (incomplete activation), search by hand tag
-            let hand_tag = format!("hand:{}", instance.hand_id);
-            for entry in self.registry.list() {
-                if entry.tags.contains(&hand_tag) {
-                    if let Err(e) = self.kill_agent(entry.id) {
-                        warn!(agent = %entry.id, error = %e, "Failed to kill orphaned hand agent");
-                    } else {
-                        info!(agent_id = %entry.id, hand_id = %instance.hand_id, "Cleaned up orphaned hand agent");
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Pause a hand (marks it paused; agent stays alive but won't receive new work).
-    pub fn pause_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
-        self.hand_registry
-            .pause(instance_id)
-            .map_err(|e| KernelError::OpenFang(OpenFangError::Internal(e.to_string())))
-    }
-
-    /// Resume a paused hand.
-    pub fn resume_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
-        self.hand_registry
-            .resume(instance_id)
-            .map_err(|e| KernelError::OpenFang(OpenFangError::Internal(e.to_string())))
-    }
-
     /// Set the weak self-reference for trigger dispatch.
     ///
     /// Must be called once after the kernel is wrapped in `Arc`.
@@ -3103,7 +4069,27 @@ impl OpenFangKernel {
         }
 
         // Build the reload plan
-        let plan = build_reload_plan(&self.config, &new_config);
+        let mut plan = build_reload_plan(&self.config, &new_config);
+        let new_control_policy = new_config.platform.control_policy();
+        let live_control_changed = self
+            .control_policy
+            .read()
+            .map(|p| {
+                p.controlled_side != new_control_policy.controlled_side
+                    || p.threat_side != new_control_policy.threat_side
+                    || p.controlled_platforms != new_control_policy.controlled_platforms
+                    || p.controller_id != new_control_policy.controller_id
+                    || p.own_platform_id != new_control_policy.own_platform_id
+            })
+            .unwrap_or(false);
+        if live_control_changed
+            && !plan
+                .hot_actions
+                .contains(&crate::config_reload::HotAction::UpdatePlatformControl)
+        {
+            plan.hot_actions
+                .push(crate::config_reload::HotAction::UpdatePlatformControl);
+        }
         plan.log_summary();
 
         // Apply hot actions if the reload mode allows it
@@ -3129,6 +4115,46 @@ impl OpenFangKernel {
                     self.approval_manager
                         .update_policy(new_config.approval.clone());
                 }
+                HotAction::UpdatePlatformIntervention => {
+                    info!("Hot-reload: updating platform intervention and cooldown rules");
+                    if let Some(control) = &self.platform_control {
+                        match control.try_lock() {
+                            Ok(mut control) => {
+                                if !control.update_intervention_config(
+                                    new_config.platform.intervention.clone(),
+                                ) {
+                                    warn!("Hot-reload: platform intervention gate unavailable");
+                                }
+                                control.update_cooldown_config(
+                                    new_config.platform.engagement_cooldown_secs,
+                                    new_config.platform.weapon_cooldowns_secs.clone(),
+                                );
+                            }
+                            Err(_) => {
+                                warn!(
+                                    "Hot-reload: platform control loop busy; intervention rules not applied"
+                                );
+                            }
+                        }
+                    } else {
+                        info!("Hot-reload: no platform control loop configured");
+                    }
+                }
+                HotAction::UpdatePlatformControl => {
+                    let new_policy = new_config.platform.control_policy();
+                    info!(
+                        controlled_side = ?new_policy.controlled_side,
+                        threat_side = ?new_policy.threat_side,
+                        "Hot-reload: updating platform control policy"
+                    );
+                    // Live holder: read by the slow loop each cycle and by
+                    // GET /api/platform/pending — resyncs without a restart.
+                    if let Ok(mut p) = self.control_policy.write() {
+                        *p = new_policy;
+                    } else {
+                        warn!("Hot-reload: control policy holder poisoned; not updated");
+                    }
+                }
                 HotAction::UpdateCronConfig => {
                     info!(
                         "Hot-reload: updating cron config (max_jobs={})",
@@ -3139,11 +4165,16 @@ impl OpenFangKernel {
                 }
                 HotAction::ReloadProviderUrls => {
                     info!("Hot-reload: applying provider URL overrides");
-                    let mut catalog = self
-                        .model_catalog
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
-                    catalog.apply_url_overrides(&new_config.provider_urls);
+                    if let Ok(mut catalog) = self.model_catalog.write() {
+                        sync_model_catalog_llm_urls(&mut catalog, new_config);
+                    }
+                    if let Ok(mut driver) = self.default_driver.write() {
+                        *driver = build_default_llm_driver(new_config);
+                        info!(
+                            provider = %new_config.default_model.provider,
+                            "Hot-reload: rebuilt default LLM driver"
+                        );
+                    }
                 }
                 HotAction::UpdateDefaultModel => {
                     info!(
@@ -3155,9 +4186,19 @@ impl OpenFangKernel {
                         .write()
                         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
                     *guard = Some(new_config.default_model.clone());
+                    if let Ok(mut catalog) = self.model_catalog.write() {
+                        sync_model_catalog_llm_urls(&mut catalog, new_config);
+                    }
+                    if let Ok(mut driver) = self.default_driver.write() {
+                        *driver = build_default_llm_driver(new_config);
+                        info!(
+                            provider = %new_config.default_model.provider,
+                            "Hot-reload: rebuilt default LLM driver"
+                        );
+                    }
                 }
                 _ => {
-                    // Other hot actions (channels, web, browser, extensions, etc.)
+                    // Other hot actions (web, browser, etc.)
                     // are logged but not applied here — they require subsystem-specific
                     // reinitialization that should be added as those systems mature.
                     info!(
@@ -3310,14 +4351,17 @@ impl OpenFangKernel {
     /// `Continuous`, `Periodic`, or `Proactive` schedules.
     pub fn start_background_agents(self: &Arc<Self>) {
         let agents = self.registry.list();
-        let mut bg_agents: Vec<(openfang_types::agent::AgentId, String, ScheduleMode)> =
-            Vec::new();
+        let mut bg_agents: Vec<(openfang_types::agent::AgentId, String, ScheduleMode)> = Vec::new();
 
         for entry in &agents {
             if matches!(entry.manifest.schedule, ScheduleMode::Reactive) {
                 continue;
             }
-            bg_agents.push((entry.id, entry.name.clone(), entry.manifest.schedule.clone()));
+            bg_agents.push((
+                entry.id,
+                entry.name.clone(),
+                entry.manifest.schedule.clone(),
+            ));
         }
 
         if !bg_agents.is_empty() {
@@ -3467,14 +4511,6 @@ impl OpenFangKernel {
             });
         }
 
-        // Start extension health monitor background task
-        {
-            let kernel = Arc::clone(self);
-            tokio::spawn(async move {
-                kernel.run_extension_health_loop().await;
-            });
-        }
-
         // Cron scheduler tick loop — fires due jobs every 15 seconds
         {
             let kernel = Arc::clone(self);
@@ -3524,7 +4560,9 @@ impl OpenFangKernel {
                                 let timeout_s = timeout_secs.unwrap_or(120);
                                 let timeout = std::time::Duration::from_secs(timeout_s);
                                 let delivery = job.delivery.clone();
-                                let kh: std::sync::Arc<dyn openfang_runtime::kernel_handle::KernelHandle> = kernel.clone();
+                                let kh: std::sync::Arc<
+                                    dyn openfang_runtime::kernel_handle::KernelHandle,
+                                > = kernel.clone();
                                 match tokio::time::timeout(
                                     timeout,
                                     kernel.send_message_with_handle(agent_id, message, Some(kh)),
@@ -3828,6 +4866,12 @@ impl OpenFangKernel {
             }
         }
 
+        if let Ok(guard) = self.llamacpp_server_pid.lock() {
+            if let Some(pid) = *guard {
+                crate::llamacpp_server::stop_server(pid);
+            }
+        }
+
         self.supervisor.shutdown();
 
         // Update agent states to Suspended in persistent storage (not delete)
@@ -3859,7 +4903,7 @@ impl OpenFangKernel {
         let has_custom_url = manifest.model.base_url.is_some();
 
         let primary = if agent_provider == default_provider && !has_custom_key && !has_custom_url {
-            Arc::clone(&self.default_driver)
+            self.default_llm_driver()
         } else {
             // Create a dedicated driver for this agent.
             //
@@ -3895,14 +4939,18 @@ impl OpenFangKernel {
             let base_url = if has_custom_url {
                 manifest.model.base_url.clone()
             } else if agent_provider == default_provider {
-                self.config
-                    .default_model
-                    .base_url
-                    .clone()
-                    .or_else(|| self.config.provider_urls.get(agent_provider.as_str()).cloned())
+                self.config.default_model.base_url.clone().or_else(|| {
+                    self.config
+                        .provider_urls
+                        .get(agent_provider.as_str())
+                        .cloned()
+                })
             } else {
                 // Check provider_urls before falling back to hardcoded defaults
-                self.config.provider_urls.get(agent_provider.as_str()).cloned()
+                self.config
+                    .provider_urls
+                    .get(agent_provider.as_str())
+                    .cloned()
             };
 
             let driver_config = DriverConfig {
@@ -3919,8 +4967,10 @@ impl OpenFangKernel {
         // If fallback models are configured, wrap in FallbackDriver
         if !manifest.fallback_models.is_empty() {
             // Primary driver uses the agent's own model name (already set in request)
-            let mut chain: Vec<(std::sync::Arc<dyn openfang_runtime::llm_driver::LlmDriver>, String)> =
-                vec![(primary.clone(), String::new())];
+            let mut chain: Vec<(
+                std::sync::Arc<dyn openfang_runtime::llm_driver::LlmDriver>,
+                String,
+            )> = vec![(primary.clone(), String::new())];
             for fb in &manifest.fallback_models {
                 let config = DriverConfig {
                     provider: fb.provider.clone(),
@@ -3989,9 +5039,6 @@ impl OpenFangKernel {
                         tools = tool_count,
                         "MCP server connected"
                     );
-                    // Update extension health if this is an extension-provided server
-                    self.extension_health
-                        .report_ok(&server_config.name, tool_count);
                     self.mcp_connections.lock().await.push(conn);
                 }
                 Err(e) => {
@@ -4000,8 +5047,6 @@ impl OpenFangKernel {
                         error = %e,
                         "Failed to connect to MCP server"
                     );
-                    self.extension_health
-                        .report_error(&server_config.name, e.to_string());
                 }
             }
         }
@@ -4015,256 +5060,9 @@ impl OpenFangKernel {
         }
     }
 
-    /// Reload extension configs and connect any new MCP servers.
-    ///
-    /// Called by the API reload endpoint after CLI installs/removes integrations.
-    pub async fn reload_extension_mcps(self: &Arc<Self>) -> Result<usize, String> {
-        use openfang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
-        use openfang_types::config::McpTransportEntry;
-
-        // 1. Reload installed integrations from disk
-        let installed_count = {
-            let mut registry = self
-                .extension_registry
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            registry.load_installed().map_err(|e| e.to_string())?
-        };
-
-        // 2. Rebuild effective MCP server list
-        let new_configs = {
-            let registry = self
-                .extension_registry
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            let ext_mcp_configs = registry.to_mcp_configs();
-            let mut all = self.config.mcp_servers.clone();
-            for ext_cfg in ext_mcp_configs {
-                if !all.iter().any(|s| s.name == ext_cfg.name) {
-                    all.push(ext_cfg);
-                }
-            }
-            all
-        };
-
-        // 3. Find servers that aren't already connected
-        let already_connected: Vec<String> = self
-            .mcp_connections
-            .lock()
-            .await
-            .iter()
-            .map(|c| c.name().to_string())
-            .collect();
-
-        let new_servers: Vec<_> = new_configs
-            .iter()
-            .filter(|s| !already_connected.contains(&s.name))
-            .cloned()
-            .collect();
-
-        // 4. Update effective list
-        if let Ok(mut effective) = self.effective_mcp_servers.write() {
-            *effective = new_configs;
-        }
-
-        // 5. Connect new servers
-        let mut connected_count = 0;
-        for server_config in &new_servers {
-            let transport = match &server_config.transport {
-                McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
-                    command: command.clone(),
-                    args: args.clone(),
-                },
-                McpTransportEntry::Sse { url } => McpTransport::Sse { url: url.clone() },
-            };
-
-            let mcp_config = McpServerConfig {
-                name: server_config.name.clone(),
-                transport,
-                timeout_secs: server_config.timeout_secs,
-                env: server_config.env.clone(),
-            };
-
-            self.extension_health.register(&server_config.name);
-
-            match McpConnection::connect(mcp_config).await {
-                Ok(conn) => {
-                    let tool_count = conn.tools().len();
-                    if let Ok(mut tools) = self.mcp_tools.lock() {
-                        tools.extend(conn.tools().iter().cloned());
-                    }
-                    self.extension_health
-                        .report_ok(&server_config.name, tool_count);
-                    info!(
-                        server = %server_config.name,
-                        tools = tool_count,
-                        "Extension MCP server connected (hot-reload)"
-                    );
-                    self.mcp_connections.lock().await.push(conn);
-                    connected_count += 1;
-                }
-                Err(e) => {
-                    self.extension_health
-                        .report_error(&server_config.name, e.to_string());
-                    warn!(
-                        server = %server_config.name,
-                        error = %e,
-                        "Failed to connect extension MCP server"
-                    );
-                }
-            }
-        }
-
-        // 6. Remove connections for uninstalled integrations
-        let removed: Vec<String> = already_connected
-            .iter()
-            .filter(|name| {
-                let effective = self
-                    .effective_mcp_servers
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
-                !effective.iter().any(|s| &s.name == *name)
-            })
-            .cloned()
-            .collect();
-
-        if !removed.is_empty() {
-            let mut conns = self.mcp_connections.lock().await;
-            conns.retain(|c| !removed.contains(&c.name().to_string()));
-            // Rebuild tool cache
-            if let Ok(mut tools) = self.mcp_tools.lock() {
-                tools.clear();
-                for conn in conns.iter() {
-                    tools.extend(conn.tools().iter().cloned());
-                }
-            }
-            for name in &removed {
-                self.extension_health.unregister(name);
-                info!(server = %name, "Extension MCP server disconnected (removed)");
-            }
-        }
-
-        info!(
-            "Extension reload: {} installed, {} new connections, {} removed",
-            installed_count,
-            connected_count,
-            removed.len()
-        );
-        Ok(connected_count)
-    }
-
-    /// Reconnect a single extension MCP server by ID.
-    pub async fn reconnect_extension_mcp(self: &Arc<Self>, id: &str) -> Result<usize, String> {
-        use openfang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
-        use openfang_types::config::McpTransportEntry;
-
-        // Find the config for this server
-        let server_config = {
-            let effective = self
-                .effective_mcp_servers
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            effective.iter().find(|s| s.name == id).cloned()
-        };
-
-        let server_config =
-            server_config.ok_or_else(|| format!("No MCP config found for integration '{id}'"))?;
-
-        // Disconnect existing connection if any
-        {
-            let mut conns = self.mcp_connections.lock().await;
-            let old_len = conns.len();
-            conns.retain(|c| c.name() != id);
-            if conns.len() < old_len {
-                // Rebuild tool cache
-                if let Ok(mut tools) = self.mcp_tools.lock() {
-                    tools.clear();
-                    for conn in conns.iter() {
-                        tools.extend(conn.tools().iter().cloned());
-                    }
-                }
-            }
-        }
-
-        self.extension_health.mark_reconnecting(id);
-
-        let transport = match &server_config.transport {
-            McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
-                command: command.clone(),
-                args: args.clone(),
-            },
-            McpTransportEntry::Sse { url } => McpTransport::Sse { url: url.clone() },
-        };
-
-        let mcp_config = McpServerConfig {
-            name: server_config.name.clone(),
-            transport,
-            timeout_secs: server_config.timeout_secs,
-            env: server_config.env.clone(),
-        };
-
-        match McpConnection::connect(mcp_config).await {
-            Ok(conn) => {
-                let tool_count = conn.tools().len();
-                if let Ok(mut tools) = self.mcp_tools.lock() {
-                    tools.extend(conn.tools().iter().cloned());
-                }
-                self.extension_health.report_ok(id, tool_count);
-                info!(
-                    server = %id,
-                    tools = tool_count,
-                    "Extension MCP server reconnected"
-                );
-                self.mcp_connections.lock().await.push(conn);
-                Ok(tool_count)
-            }
-            Err(e) => {
-                self.extension_health.report_error(id, e.to_string());
-                Err(format!("Reconnect failed for '{id}': {e}"))
-            }
-        }
-    }
-
-    /// Background loop that checks extension MCP health and auto-reconnects.
-    async fn run_extension_health_loop(self: &Arc<Self>) {
-        let interval_secs = self.extension_health.config().check_interval_secs;
-        if interval_secs == 0 {
-            return;
-        }
-
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-        interval.tick().await; // skip first immediate tick
-
-        loop {
-            interval.tick().await;
-
-            // Check each registered integration
-            let health_entries = self.extension_health.all_health();
-            for entry in health_entries {
-                // Try reconnect for errored integrations
-                if self.extension_health.should_reconnect(&entry.id) {
-                    let backoff = self
-                        .extension_health
-                        .backoff_duration(entry.reconnect_attempts);
-                    debug!(
-                        server = %entry.id,
-                        attempt = entry.reconnect_attempts + 1,
-                        backoff_secs = backoff.as_secs(),
-                        "Auto-reconnecting extension MCP server"
-                    );
-                    tokio::time::sleep(backoff).await;
-
-                    if let Err(e) = self.reconnect_extension_mcp(&entry.id).await {
-                        debug!(server = %entry.id, error = %e, "Auto-reconnect failed");
-                    }
-                }
-            }
-        }
-    }
-
     /// Get the list of tools available to an agent based on its capabilities.
     fn available_tools(&self, agent_id: AgentId) -> Vec<ToolDefinition> {
-        let all_builtins = builtin_tool_definitions();
+        let all_builtins = all_builtin_tool_definitions();
 
         // Look up agent entry for profile, skill/MCP allowlists, and capabilities
         let entry = self.registry.get(agent_id);
@@ -4292,7 +5090,14 @@ impl OpenFangKernel {
                 let allowed = profile.tools();
                 all_builtins
                     .into_iter()
-                    .filter(|t| allowed.iter().any(|a| a == "*" || a == &t.name))
+                    .filter(|t| {
+                        allowed.iter().any(|a| {
+                            capability_matches(
+                                &Capability::ToolInvoke(a.clone()),
+                                &Capability::ToolInvoke(t.name.clone()),
+                            )
+                        })
+                    })
                     .collect()
             }
             _ if has_tool_all => all_builtins,
@@ -4345,7 +5150,12 @@ impl OpenFangKernel {
         // Apply per-agent tool allowlist/blocklist (manifest-level filtering)
         let (tool_allowlist, tool_blocklist) = entry
             .as_ref()
-            .map(|e| (e.manifest.tool_allowlist.clone(), e.manifest.tool_blocklist.clone()))
+            .map(|e| {
+                (
+                    e.manifest.tool_allowlist.clone(),
+                    e.manifest.tool_blocklist.clone(),
+                )
+            })
             .unwrap_or_default();
 
         if !tool_allowlist.is_empty() {
@@ -4379,7 +5189,10 @@ impl OpenFangKernel {
             .into_iter()
             .filter(|tool| {
                 caps.iter().any(|c| match c {
-                    Capability::ToolInvoke(name) => name == &tool.name || name == "*",
+                    Capability::ToolInvoke(name) => capability_matches(
+                        &Capability::ToolInvoke(name.clone()),
+                        &Capability::ToolInvoke(tool.name.clone()),
+                    ),
                     _ => false,
                 })
             })
@@ -4504,7 +5317,8 @@ impl OpenFangKernel {
                 tool_names.join(", ")
             ));
         }
-        summary.push_str("MCP tools are prefixed with mcp_{server}_ and work like regular tools.\n");
+        summary
+            .push_str("MCP tools are prefixed with mcp_{server}_ and work like regular tools.\n");
         // Add filesystem-specific guidance when a filesystem MCP server is connected
         let has_filesystem = servers.keys().any(|s| s.contains("filesystem"));
         if has_filesystem {
@@ -4683,8 +5497,8 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
             "minimax" | "gemini" | "anthropic" | "openai" | "groq" | "deepseek" | "mistral"
             | "cohere" | "xai" | "ollama" | "together" | "fireworks" | "perplexity"
             | "cerebras" | "sambanova" | "replicate" | "huggingface" | "ai21" | "codex"
-            | "claude-code" | "copilot" | "github-copilot" | "qwen" | "zhipu" | "zai" | "moonshot"
-            | "openrouter" | "volcengine" | "doubao" | "dashscope" => {
+            | "claude-code" | "copilot" | "github-copilot" | "qwen" | "zhipu" | "zai"
+            | "moonshot" | "openrouter" | "volcengine" | "doubao" | "dashscope" => {
                 return Some(prefix.to_string());
             }
             _ => {}
@@ -4697,16 +5511,26 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
         Some("gemini".to_string())
     } else if lower.starts_with("claude") {
         Some("anthropic".to_string())
-    } else if lower.starts_with("gpt") || lower.starts_with("o1") || lower.starts_with("o3") || lower.starts_with("o4") {
+    } else if lower.starts_with("gpt")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+    {
         Some("openai".to_string())
-    } else if lower.starts_with("llama") || lower.starts_with("mixtral") || lower.starts_with("qwen") {
+    } else if lower.starts_with("llama")
+        || lower.starts_with("mixtral")
+        || lower.starts_with("qwen")
+    {
         // These could be on multiple providers; don't infer
         None
     } else if lower.starts_with("grok") {
         Some("xai".to_string())
     } else if lower.starts_with("deepseek") {
         Some("deepseek".to_string())
-    } else if lower.starts_with("mistral") || lower.starts_with("codestral") || lower.starts_with("pixtral") {
+    } else if lower.starts_with("mistral")
+        || lower.starts_with("codestral")
+        || lower.starts_with("pixtral")
+    {
         Some("mistral".to_string())
     } else if lower.starts_with("command") || lower.starts_with("embed-") {
         Some("cohere".to_string())
@@ -4804,6 +5628,99 @@ async fn cron_deliver_response(
 
 #[async_trait]
 impl KernelHandle for OpenFangKernel {
+    async fn dispatch_platform_command(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        caller_agent_id: Option<&str>,
+    ) -> Result<String, String> {
+        if !self.platform_registry.has_primary() {
+            return Err("platform layer disabled (no adapter configured)".to_string());
+        }
+        // Ensure adapters are connected (idempotent; cheap when already up).
+        if !self.platform_registry.any_connected() {
+            if let Err(e) = self.platform_registry.connect_all().await {
+                return Err(format!("adapter connect failed: {e}"));
+            }
+        }
+
+        // Carry persona identity through to the audit trail and the tactical
+        // policy layer. Empty/missing ids fall back to a stable `tool` label so
+        // every intent has a well-defined provenance.
+        let source = openfang_runtime::tactical_policy::intent_source_for_agent(caller_agent_id);
+        match openfang_runtime::platform_tools::map_tool_to_intent(
+            tool_name,
+            args,
+            source,
+            openfang_types::tactical::CommandPriority::Normal,
+            0.0,
+        )? {
+            Some(intent) => {
+                // Per-agent tactical policy — soft envelope at the LLM↔platform
+                // boundary. Hard SPGS/ROE/quorum gates still run downstream.
+                if let Some(name) = caller_agent_id.map(str::trim).filter(|s| !s.is_empty()) {
+                    if let Some(entry) = self.registry.find_by_name(name) {
+                        if let Some(policy) = entry.manifest.tactical_policy.as_ref() {
+                            let active_mode = self.active_autonomy_mode_id();
+                            let result = openfang_runtime::tactical_policy::enforce(
+                                &self.audit_log,
+                                &intent,
+                                policy,
+                                &active_mode,
+                            );
+                            match result {
+                                openfang_runtime::tactical_policy::TacticalGuardResult::Allow => {}
+                                openfang_runtime::tactical_policy::TacticalGuardResult::Reject(reason) => {
+                                    return Err(format!(
+                                        "tactical policy rejected intent: {reason}"
+                                    ));
+                                }
+                                openfang_runtime::tactical_policy::TacticalGuardResult::Advisory(reason) => {
+                                    return Ok(format!(
+                                        "advisory-only persona: intent recorded, no actuation ({reason})"
+                                    ));
+                                }
+                                openfang_runtime::tactical_policy::TacticalGuardResult::RequireApproval(reason) => {
+                                    return Ok(format!(
+                                        "queued for human approval ({reason}); intent {} not yet dispatched",
+                                        intent.id
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let Some(control) = &self.platform_control else {
+                    return Err("platform control loop unavailable".to_string());
+                };
+                let mut control = control.lock().await;
+                control.submit_intent(intent);
+                let report = control.step().await;
+                Ok(format!(
+                    "accepted by pipeline (dispatched={}, pending={}, rejected={})",
+                    report.pipeline.dispatched, report.pipeline.pending, report.pipeline.rejected
+                ))
+            }
+            // Query/management tools: service the high-value ones directly.
+            None => match tool_name {
+                "platform_get_state" => match self.platform_registry.poll_all().await {
+                    Ok(snap) => Ok(format!(
+                        "world: t={:.1}s platforms={} munitions={} events={}",
+                        snap.timestamp,
+                        snap.platforms.len(),
+                        snap.active_munitions.len(),
+                        snap.events.len()
+                    )),
+                    Err(e) => Err(format!("state poll error: {e}")),
+                },
+                other => Err(format!(
+                    "platform query tool '{other}' is recognized but not serviced in this build"
+                )),
+            },
+        }
+    }
+
     async fn spawn_agent(
         &self,
         manifest_toml: &str,
@@ -5080,109 +5997,6 @@ impl KernelHandle for OpenFangKernel {
         Ok(())
     }
 
-    async fn hand_list(&self) -> Result<Vec<serde_json::Value>, String> {
-        let defs = self.hand_registry.list_definitions();
-        let instances = self.hand_registry.list_instances();
-
-        let mut result = Vec::new();
-        for def in defs {
-            // Check if this hand has an active instance
-            let active_instance = instances.iter().find(|i| i.hand_id == def.id);
-            let (status, instance_id, agent_id) = match active_instance {
-                Some(inst) => (
-                    format!("{}", inst.status),
-                    Some(inst.instance_id.to_string()),
-                    inst.agent_id.map(|a| a.to_string()),
-                ),
-                None => ("available".to_string(), None, None),
-            };
-
-            let mut entry = serde_json::json!({
-                "id": def.id,
-                "name": def.name,
-                "icon": def.icon,
-                "category": format!("{:?}", def.category),
-                "description": def.description,
-                "status": status,
-                "tools": def.tools,
-            });
-            if let Some(iid) = instance_id {
-                entry["instance_id"] = serde_json::json!(iid);
-            }
-            if let Some(aid) = agent_id {
-                entry["agent_id"] = serde_json::json!(aid);
-            }
-            result.push(entry);
-        }
-        Ok(result)
-    }
-
-    async fn hand_install(
-        &self,
-        toml_content: &str,
-        skill_content: &str,
-    ) -> Result<serde_json::Value, String> {
-        let def = self
-            .hand_registry
-            .install_from_content(toml_content, skill_content)
-            .map_err(|e| format!("{e}"))?;
-
-        Ok(serde_json::json!({
-            "id": def.id,
-            "name": def.name,
-            "description": def.description,
-            "category": format!("{:?}", def.category),
-        }))
-    }
-
-    async fn hand_activate(
-        &self,
-        hand_id: &str,
-        config: std::collections::HashMap<String, serde_json::Value>,
-    ) -> Result<serde_json::Value, String> {
-        let instance = self
-            .activate_hand(hand_id, config)
-            .map_err(|e| format!("{e}"))?;
-
-        Ok(serde_json::json!({
-            "instance_id": instance.instance_id.to_string(),
-            "hand_id": instance.hand_id,
-            "agent_name": instance.agent_name,
-            "agent_id": instance.agent_id.map(|a| a.to_string()),
-            "status": format!("{}", instance.status),
-        }))
-    }
-
-    async fn hand_status(&self, hand_id: &str) -> Result<serde_json::Value, String> {
-        let instances = self.hand_registry.list_instances();
-        let instance = instances
-            .iter()
-            .find(|i| i.hand_id == hand_id)
-            .ok_or_else(|| format!("No active instance found for hand '{hand_id}'"))?;
-
-        let def = self.hand_registry.get_definition(hand_id);
-        let def_name = def.as_ref().map(|d| d.name.clone()).unwrap_or_default();
-        let def_icon = def.as_ref().map(|d| d.icon.clone()).unwrap_or_default();
-
-        Ok(serde_json::json!({
-            "hand_id": hand_id,
-            "name": def_name,
-            "icon": def_icon,
-            "instance_id": instance.instance_id.to_string(),
-            "status": format!("{}", instance.status),
-            "agent_id": instance.agent_id.map(|a| a.to_string()),
-            "agent_name": instance.agent_name,
-            "activated_at": instance.activated_at.to_rfc3339(),
-            "updated_at": instance.updated_at.to_rfc3339(),
-        }))
-    }
-
-    async fn hand_deactivate(&self, instance_id: &str) -> Result<(), String> {
-        let uuid =
-            uuid::Uuid::parse_str(instance_id).map_err(|e| format!("Invalid instance ID: {e}"))?;
-        self.deactivate_hand(uuid).map_err(|e| format!("{e}"))
-    }
-
     fn requires_approval(&self, tool_name: &str) -> bool {
         self.approval_manager.requires_approval(tool_name)
     }
@@ -5243,95 +6057,6 @@ impl KernelHandle for OpenFangKernel {
             .iter()
             .find(|(_, card)| card.name.to_lowercase() == name_lower)
             .map(|(url, _)| url.clone())
-    }
-
-    async fn send_channel_message(
-        &self,
-        channel: &str,
-        recipient: &str,
-        message: &str,
-    ) -> Result<String, String> {
-        let adapter = self
-            .channel_adapters
-            .get(channel)
-            .ok_or_else(|| {
-                let available: Vec<String> = self
-                    .channel_adapters
-                    .iter()
-                    .map(|e| e.key().clone())
-                    .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
-            })?
-            .clone();
-
-        let user = openfang_channels::types::ChannelUser {
-            platform_id: recipient.to_string(),
-            display_name: recipient.to_string(),
-            openfang_user: None,
-        };
-
-        adapter
-            .send(&user, openfang_channels::types::ChannelContent::Text(message.to_string()))
-            .await
-            .map_err(|e| format!("Channel send failed: {e}"))?;
-
-        Ok(format!("Message sent to {} via {}", recipient, channel))
-    }
-
-    async fn send_channel_media(
-        &self,
-        channel: &str,
-        recipient: &str,
-        media_type: &str,
-        media_url: &str,
-        caption: Option<&str>,
-        filename: Option<&str>,
-    ) -> Result<String, String> {
-        let adapter = self
-            .channel_adapters
-            .get(channel)
-            .ok_or_else(|| {
-                let available: Vec<String> = self
-                    .channel_adapters
-                    .iter()
-                    .map(|e| e.key().clone())
-                    .collect();
-                format!(
-                    "Channel '{}' not found. Available channels: {:?}",
-                    channel, available
-                )
-            })?
-            .clone();
-
-        let user = openfang_channels::types::ChannelUser {
-            platform_id: recipient.to_string(),
-            display_name: recipient.to_string(),
-            openfang_user: None,
-        };
-
-        let content = match media_type {
-            "image" => openfang_channels::types::ChannelContent::Image {
-                url: media_url.to_string(),
-                caption: caption.map(|s| s.to_string()),
-            },
-            "file" => openfang_channels::types::ChannelContent::File {
-                url: media_url.to_string(),
-                filename: filename.unwrap_or("file").to_string(),
-            },
-            _ => {
-                return Err(format!("Unsupported media type: '{media_type}'. Use 'image' or 'file'."));
-            }
-        };
-
-        adapter
-            .send(&user, content)
-            .await
-            .map_err(|e| format!("Channel media send failed: {e}"))?;
-
-        Ok(format!("{} sent to {} via {}", media_type, recipient, channel))
     }
 
     async fn spawn_agent_checked(
@@ -5467,6 +6192,7 @@ mod tests {
             exec_policy: None,
             tool_allowlist: vec![],
             tool_blocklist: vec![],
+            tactical_policy: None,
         };
         manifest.capabilities.tools = vec!["file_read".to_string(), "web_fetch".to_string()];
         manifest.capabilities.agent_spawn = true;
@@ -5475,6 +6201,15 @@ mod tests {
         assert!(caps.contains(&Capability::ToolInvoke("file_read".to_string())));
         assert!(caps.contains(&Capability::AgentSpawn));
         assert_eq!(caps.len(), 3); // 2 tools + agent_spawn
+    }
+
+    #[test]
+    fn builtin_tools_include_platform_control_schemas() {
+        let tools = all_builtin_tool_definitions();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"platform_get_state"));
+        assert!(names.contains(&"platform_set_heading"));
+        assert!(names.contains(&"platform_fire_at_target"));
     }
 
     fn test_manifest(name: &str, description: &str, tags: Vec<String>) -> AgentManifest {
@@ -5504,6 +6239,7 @@ mod tests {
             exec_policy: None,
             tool_allowlist: vec![],
             tool_blocklist: vec![],
+            tactical_policy: None,
         }
     }
 

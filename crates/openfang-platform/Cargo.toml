@@ -1,0 +1,19 @@
+[package]
+name = "openfang-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Platform adapter abstraction layer — protocol-agnostic interface for simulation and hardware backends"
+
+[dependencies]
+openfang-types = { path = "../openfang-types" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dashmap = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

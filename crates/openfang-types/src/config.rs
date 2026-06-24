@@ -579,31 +579,6 @@ impl Default for PairingConfig {
     }
 }
 
-/// Extensions & integrations configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ExtensionsConfig {
-    /// Enable auto-reconnect for MCP integrations.
-    pub auto_reconnect: bool,
-    /// Maximum reconnect attempts before giving up.
-    pub reconnect_max_attempts: u32,
-    /// Maximum backoff duration in seconds.
-    pub reconnect_max_backoff_secs: u64,
-    /// Health check interval in seconds.
-    pub health_check_interval_secs: u64,
-}
-
-impl Default for ExtensionsConfig {
-    fn default() -> Self {
-        Self {
-            auto_reconnect: true,
-            reconnect_max_attempts: 10,
-            reconnect_max_backoff_secs: 300,
-            health_check_interval_secs: 60,
-        }
-    }
-}
-
 /// Credential vault configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -973,9 +948,6 @@ pub struct KernelConfig {
     /// Browser automation configuration.
     #[serde(default)]
     pub browser: BrowserConfig,
-    /// Extensions & integrations configuration.
-    #[serde(default)]
-    pub extensions: ExtensionsConfig,
     /// Credential vault configuration.
     #[serde(default)]
     pub vault: VaultConfig,
@@ -1045,6 +1017,13 @@ pub struct KernelConfig {
     /// OAuth client ID overrides for PKCE flows.
     #[serde(default)]
     pub oauth: OAuthConfig,
+    /// Platform adapter configuration (simulation / hardware backends for
+    /// tactical control). Drives which adapters the kernel loads at boot.
+    #[serde(default)]
+    pub platform: PlatformConfig,
+    /// llama.cpp local GGUF inference server (optional managed subprocess).
+    #[serde(default)]
+    pub llamacpp: LlamaCppConfig,
 }
 
 /// OAuth client ID overrides for PKCE flows.
@@ -1189,7 +1168,6 @@ impl Default for KernelConfig {
             web: WebConfig::default(),
             fallback_providers: Vec::new(),
             browser: BrowserConfig::default(),
-            extensions: ExtensionsConfig::default(),
             vault: VaultConfig::default(),
             workspaces_dir: None,
             media: crate::media::MediaConfig::default(),
@@ -1212,6 +1190,1291 @@ impl Default for KernelConfig {
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
             oauth: OAuthConfig::default(),
+            platform: PlatformConfig::default(),
+            llamacpp: LlamaCppConfig::default(),
+        }
+    }
+}
+
+/// Which affiliation OpenFang treats as **controllable own-force** for the slow
+/// cognitive loop (LLM planning, mission allocation, tasking).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlledSide {
+    /// Blue force only — default for LLM/slow-loop control.
+    #[default]
+    Blue,
+    /// Red force only — useful when OpenFang is deployed as/opposes the red side.
+    Red,
+    /// Friend (UMAA alias for allied non-blue) only.
+    Friend,
+    /// Both Blue and Friend platforms are eligible.
+    BlueAndFriend,
+}
+
+impl ControlledSide {
+    pub fn matches(&self, affiliation: crate::platform::Affiliation) -> bool {
+        use crate::platform::Affiliation;
+        match self {
+            Self::Blue => affiliation == Affiliation::Blue,
+            Self::Red => affiliation == Affiliation::Red,
+            Self::Friend => affiliation == Affiliation::Friend,
+            Self::BlueAndFriend => {
+                matches!(affiliation, Affiliation::Blue | Affiliation::Friend)
+            }
+        }
+    }
+
+    /// Does `affiliation` belong to the **opposing coalition** of the side we
+    /// control? This is the core "threats are the other side" rule: if we drive
+    /// the red force, blue/friend are hostile; if we drive blue/friend, red is
+    /// hostile. `Foe` is universally hostile and handled by the caller; neutral
+    /// and unknown are never auto-classified by side alone.
+    pub fn opposing_is_threat(&self, affiliation: crate::platform::Affiliation) -> bool {
+        use crate::platform::Affiliation;
+        match self {
+            Self::Blue | Self::Friend | Self::BlueAndFriend => affiliation == Affiliation::Red,
+            Self::Red => matches!(affiliation, Affiliation::Blue | Affiliation::Friend),
+        }
+    }
+}
+
+/// Hostile IFF labels (ASCII + common Chinese) — a track tagged this way is a
+/// threat regardless of its declared side. ArkSIM sensor tracks frequently
+/// carry only an IFF verdict (`foe`/`敌方`) without a ground-truth side.
+pub fn iff_is_hostile(iff: &str) -> bool {
+    let normalized = iff.trim().to_ascii_lowercase();
+    matches!(normalized.as_str(), "foe" | "hostile" | "enemy" | "bandit") || iff.contains('敌')
+}
+
+/// Friendly IFF labels (ASCII + common Chinese) — never auto-classified as a
+/// threat, even when the declared side would otherwise match.
+pub fn iff_is_friendly(iff: &str) -> bool {
+    let normalized = iff.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "friend" | "friendly" | "assumed_friend" | "assumedfriend"
+    ) || iff.contains('友')
+}
+
+/// Which affiliations / IFF labels count as **threats** for engagement planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreatSide {
+    Blue,
+    Red,
+    Foe,
+    /// Red + Foe affiliations and hostile IFF labels.
+    RedAndFoe,
+    /// **Default.** Threats are whichever coalition opposes [`ControlledSide`]
+    /// (red controls → blue/friend are threats; blue/friend controls → red is),
+    /// combined with hostile IFF. This keeps the threat picture correct without
+    /// hand-tuning `threat_side` whenever the controlled side changes.
+    #[default]
+    Opposite,
+}
+
+impl ThreatSide {
+    /// Resolve whether `affiliation` is a threat, given the side we control.
+    /// IFF is handled separately by [`PlatformControlPolicy::track_is_threat`];
+    /// this method reasons purely about declared affiliation.
+    pub fn is_threat_for(
+        &self,
+        controlled: ControlledSide,
+        affiliation: crate::platform::Affiliation,
+    ) -> bool {
+        use crate::platform::Affiliation;
+        match self {
+            Self::Blue => affiliation == Affiliation::Blue,
+            Self::Red => affiliation == Affiliation::Red,
+            Self::Foe => affiliation == Affiliation::Foe,
+            Self::RedAndFoe => affiliation.is_hostile(),
+            Self::Opposite => {
+                affiliation == Affiliation::Foe || controlled.opposing_is_threat(affiliation)
+            }
+        }
+    }
+}
+
+/// Resolved control scope for the platform loop: who we act for and which
+/// entities we may task. Built from [`PlatformConfig`] at boot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlatformControlPolicy {
+    /// Side OpenFang/LLM acts for when selecting own-force platforms.
+    pub controlled_side: ControlledSide,
+    /// Side(s) treated as valid engagement targets.
+    pub threat_side: ThreatSide,
+    /// Allow-list of platform ids the slow loop may task. Empty = every platform
+    /// matching [`Self::controlled_side`].
+    pub controlled_platforms: Vec<String>,
+    /// Platform id for DCC fast reflex (`"self"` in rules binds here at runtime).
+    pub own_platform_id: String,
+    /// Controller identity for audit trails and commander-intent attribution.
+    pub controller_id: String,
+    /// Weapon-employment rules keyed by component id, ArkSIM weapon type, or
+    /// broad category (`gun`, `loiter`, `missile`, `torpedo`).
+    #[serde(default)]
+    pub weapon_employment: HashMap<String, WeaponEmploymentRule>,
+}
+
+impl PlatformControlPolicy {
+    /// Authoritative track threat verdict combining IFF and declared side.
+    /// Friendly IFF protects a track; hostile IFF always flags it; otherwise the
+    /// configured [`ThreatSide`] resolves against the controlled side.
+    pub fn track_is_threat(&self, affiliation: crate::platform::Affiliation, iff: &str) -> bool {
+        if iff_is_friendly(iff) {
+            return false;
+        }
+        if iff_is_hostile(iff) {
+            return true;
+        }
+        self.threat_side
+            .is_threat_for(self.controlled_side, affiliation)
+    }
+}
+
+impl Default for PlatformControlPolicy {
+    fn default() -> Self {
+        Self {
+            controlled_side: ControlledSide::Blue,
+            threat_side: ThreatSide::Opposite,
+            controlled_platforms: Vec::new(),
+            own_platform_id: "self".into(),
+            controller_id: "openfang".into(),
+            weapon_employment: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WeaponEmploymentMode {
+    /// Preserve the LLM/refiner's bounded salvo suggestion.
+    #[default]
+    Llm,
+    /// Force `FireAtTarget` single release.
+    Single,
+    /// Force `FireSlavoAtTarget` when salvo_size > 1.
+    Salvo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WeaponEmploymentRule {
+    pub mode: WeaponEmploymentMode,
+    /// Preferred salvo size when `mode = "salvo"` and the LLM did not provide
+    /// one. Values are clamped by the runtime hard ceiling.
+    pub salvo_size: Option<u32>,
+    /// Per-weapon cap applied to LLM or configured salvo sizes.
+    pub max_salvo_size: Option<u32>,
+}
+
+impl Default for WeaponEmploymentRule {
+    fn default() -> Self {
+        Self {
+            mode: WeaponEmploymentMode::Llm,
+            salvo_size: None,
+            max_salvo_size: None,
+        }
+    }
+}
+
+/// Formation deployment role for this OpenFang instance.
+///
+/// Default model is **single instance manages a single platform**
+/// ([`FleetRole::Standalone`]). Formations are built from multiple instances:
+/// one [`FleetRole::Lead`] coordinates several [`FleetRole::Member`]s over the
+/// OFP/A2A network. Each member keeps its own brain + cerebellums and degrades
+/// to full autonomy on link loss — there is no single point of failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetRole {
+    /// Single instance managing a single platform. No peer coordination.
+    #[default]
+    Standalone,
+    /// Formation lead: may originate formation-scope workflows and task members.
+    Lead,
+    /// Formation member: accepts role/mission assignments from a lead, runs its
+    /// own brain + cerebellums, and self-arbitrates on link loss.
+    Member,
+}
+
+impl FleetRole {
+    /// Whether this node may originate formation-scope workflows.
+    pub fn is_lead(&self) -> bool {
+        matches!(self, Self::Lead)
+    }
+
+    /// Whether this node participates in a formation (lead or member).
+    pub fn in_formation(&self) -> bool {
+        matches!(self, Self::Lead | Self::Member)
+    }
+}
+
+/// Execution scope of a tactical workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowScope {
+    /// Runs on this instance's own platform / subsystems (single-instance
+    /// default). Output lands as own-platform role/posture + tactics.
+    #[default]
+    Own,
+    /// Requires peer members; only active when `fleet_role = lead`. Steps may be
+    /// routed to remote peer instances over A2A.
+    Formation,
+}
+
+impl WorkflowScope {
+    /// Whether a node in `role` may run a workflow of this scope.
+    pub fn runnable_by(&self, role: FleetRole) -> bool {
+        match self {
+            Self::Own => true,
+            Self::Formation => role.is_lead(),
+        }
+    }
+}
+
+/// How a tactical workflow is triggered in the slow loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowTriggerKind {
+    /// Fires on a fixed cadence ([`WorkflowTriggerConfig::interval_secs`]).
+    #[default]
+    Periodic,
+    /// Fires when a named situation event is raised by the cognition engine
+    /// ([`WorkflowTriggerConfig::event`], e.g. `NewContact`, `LinkLost`,
+    /// `ThreatEmitter`, `IncomingMunition`).
+    Event,
+    /// Fires when a named operator command is received
+    /// ([`WorkflowTriggerConfig::command`], e.g. `electronic_attack`, `sead`).
+    Command,
+}
+
+/// Declares when a named workflow fires and at what scope. These augment or
+/// override the triggers declared inline in the workflow definitions file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkflowTriggerConfig {
+    /// Workflow name (matches a `[[workflow]]` in the definitions file).
+    pub workflow: String,
+    /// Execution scope: `own` (single instance) or `formation` (lead-only).
+    pub scope: WorkflowScope,
+    /// Trigger kind: `periodic` | `event` | `command`.
+    pub trigger: WorkflowTriggerKind,
+    /// For periodic triggers: cadence in seconds.
+    pub interval_secs: f64,
+    /// For event triggers: the situation event name that fires this workflow.
+    pub event: Option<String>,
+    /// For command triggers: the operator command name.
+    pub command: Option<String>,
+    /// Whether this trigger is active.
+    pub enabled: bool,
+}
+
+impl Default for WorkflowTriggerConfig {
+    fn default() -> Self {
+        Self {
+            workflow: String::new(),
+            scope: WorkflowScope::Own,
+            trigger: WorkflowTriggerKind::Periodic,
+            interval_secs: 30.0,
+            event: None,
+            command: None,
+            enabled: true,
+        }
+    }
+}
+
+/// Configuration for tactical-workflow orchestration in the slow cognitive loop.
+///
+/// When [`WorkflowConfig::enabled`] is false (default) the slow loop uses the
+/// legacy single-pipeline cognition path. When enabled, the brain drives the
+/// `WorkflowEngine`: situation events / periodic ticks / operator commands fire
+/// scoped workflows whose output becomes own-platform role/posture (and, for a
+/// lead, member role/mission assignments).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkflowConfig {
+    /// Master switch for workflow-driven slow-loop orchestration (default off).
+    pub enabled: bool,
+    /// Path to the tactical workflow definitions (TOML). When relative, resolved
+    /// against `tactical-assets/workflows/`. Defaults to
+    /// `tactical-assets/workflows/tactical_workflows.toml`.
+    pub definitions_path: Option<String>,
+    /// Per-workflow trigger / scope declarations.
+    pub triggers: Vec<WorkflowTriggerConfig>,
+}
+
+/// Platform adapter layer configuration.
+///
+/// Declares the deployment mode and the set of platform adapters the kernel
+/// should construct at boot. Each adapter bridges the protocol-agnostic
+/// command/state types to a concrete backend (ArkSIM sim, DDS bus, MAVLink
+/// flight controller, or an in-memory mock for tests).
+///
+/// ```toml
+/// [platform]
+/// mode = "simulation"
+/// [platform.adapters.sim]
+/// type = "arksim"
+/// host = "127.0.0.1"
+/// arksim_service_port = 60004
+/// scenario_path = "E:/dev/ArkSIM_SCEN/ArkSIMModels/scenarios/usv_loiter_strike/usv_loiter_strike.txt"
+/// platforms = ["usv-01"]
+/// ```
+/// Default ROE weapon-release authority: `WeaponsHold` (fail-safe — no weapon
+/// release until an operator/config raises the posture).
+fn default_weapon_release_authority() -> crate::umaa::WeaponReleaseLevel {
+    crate::umaa::WeaponReleaseLevel::WeaponsHold
+}
+
+fn default_engagement_cooldown_secs() -> f64 {
+    20.0
+}
+
+/// Tunable parameters for the Direct Command Channel's reflex responses.
+///
+/// These were previously hard-coded constants inside `default_tactical_rules()`
+/// (chaff count, evasion heading, radar-lock envelope, fuel reserve, …). Lifting
+/// them into config makes the *policy* operator- and (in later phases) brain-
+/// tunable while the reflex *mechanism* stays in code. The CommandGate / ROE
+/// interlocks are unchanged: these only shape what the DCC proposes, never what
+/// is allowed to reach an actuator.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EvasionParams {
+    /// Chaff salvo size for `auto_chaff_on_radar_lock`.
+    pub chaff_count: u32,
+    /// Seconds between chaff rounds.
+    pub chaff_interval_s: f64,
+    /// Cooldown (ms) between chaff reflex fires.
+    pub chaff_cooldown_ms: u64,
+    /// Minimum track quality that counts as a radar lock.
+    pub radar_lock_quality: f64,
+    /// Max range (m) for the chaff radar-lock trigger.
+    pub radar_lock_range_m: f64,
+    /// Heading (deg) commanded by `collision_avoidance`. NOTE: currently an
+    /// absolute heading; threat-relative evasion is a later-phase enhancement.
+    pub collision_heading_deg: f64,
+    /// Cooldown (ms) between collision-avoidance maneuvers.
+    pub collision_cooldown_ms: u64,
+    /// Threat-score threshold (0..1) for the `HighThreat` condition. Lets brain/
+    /// operator tune how aggressive threat-driven reflexes are.
+    pub high_threat_score: f64,
+    /// UAV fuel reserve fraction that trips emergency RTB.
+    pub low_fuel_reserve_pct: f64,
+}
+
+impl Default for EvasionParams {
+    fn default() -> Self {
+        Self {
+            chaff_count: 3,
+            chaff_interval_s: 0.5,
+            chaff_cooldown_ms: 5000,
+            radar_lock_quality: 0.7,
+            radar_lock_range_m: 8000.0,
+            collision_heading_deg: 90.0,
+            collision_cooldown_ms: 2000,
+            high_threat_score: 0.7,
+            low_fuel_reserve_pct: 0.12,
+        }
+    }
+}
+
+/// Direct Command Channel (small-brain / cerebellum) configuration.
+///
+/// Controls whether the reflex engine runs, whether the built-in tactical rules
+/// are installed at boot, and the tunable evasion/response parameters. This is
+/// the Phase-1 seam that makes DCC policy data-driven rather than hard-coded;
+/// later phases let the slow LLM loop enable/disable/retune rules through the
+/// same `DirectCommandChannel` loader API.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DccConfig {
+    /// Master switch for the reflex engine.
+    pub enabled: bool,
+    /// Install the built-in `tactical_rules(evasion)` at boot. Disable to run a
+    /// brain/operator-authored ruleset only.
+    pub use_default_rules: bool,
+    /// Tunable parameters applied to the built-in rules.
+    pub evasion: EvasionParams,
+}
+
+impl Default for DccConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            use_default_rules: true,
+            evasion: EvasionParams::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SensorDisposition {
+    Auto,
+    PendingApproval,
+    Deny,
+    ForceOff,
+    ForceOn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SensorEmconLevel {
+    Unrestricted,
+    Restricted,
+    Silent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmconSensorRule {
+    pub emcon: SensorEmconLevel,
+    pub sensor_type: crate::platform::SensorType,
+    pub disposition: SensorDisposition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SensorPolicyConfig {
+    pub active_radar_disposition: SensorDisposition,
+    pub passive_sensor_disposition: SensorDisposition,
+    pub emcon_rules: Vec<EmconSensorRule>,
+    /// Seconds an explicit operator sensor command suppresses autonomous SMS
+    /// arbitration for that sensor. While active, SMS actively drives the
+    /// sensor to the operator-requested mode and never reverses it.
+    pub override_ttl_s: f64,
+    /// Sensor `damage` fraction at/above which SMS force-offs the sensor and
+    /// attempts a same-type failover.
+    pub damage_force_off: f64,
+    /// Range (m) within which a lost-link close threat forces survival radar on.
+    pub survival_threat_range_m: f64,
+    /// Range (m) within which an ESM-detected low-quality threat justifies
+    /// breaking EMCON to acquire an active-radar track.
+    pub esm_threat_range_m: f64,
+    /// Track quality below which (or when stale) SMS drives an EOIR gaze refresh.
+    pub track_refresh_quality: f64,
+}
+
+impl Default for SensorPolicyConfig {
+    fn default() -> Self {
+        Self {
+            active_radar_disposition: SensorDisposition::Auto,
+            passive_sensor_disposition: SensorDisposition::Auto,
+            emcon_rules: vec![
+                EmconSensorRule {
+                    emcon: SensorEmconLevel::Restricted,
+                    sensor_type: crate::platform::SensorType::Radar,
+                    disposition: SensorDisposition::ForceOff,
+                },
+                EmconSensorRule {
+                    emcon: SensorEmconLevel::Silent,
+                    sensor_type: crate::platform::SensorType::Radar,
+                    disposition: SensorDisposition::ForceOff,
+                },
+                EmconSensorRule {
+                    emcon: SensorEmconLevel::Silent,
+                    sensor_type: crate::platform::SensorType::Lidar,
+                    disposition: SensorDisposition::ForceOff,
+                },
+            ],
+            override_ttl_s: 10.0,
+            damage_force_off: 0.5,
+            survival_threat_range_m: 1_000.0,
+            esm_threat_range_m: 20_000.0,
+            track_refresh_quality: 0.4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlatformConfig {
+    /// Deployment mode. `Disabled` means the kernel performs no platform wiring.
+    pub mode: PlatformMode,
+    /// Named adapters. The first entry (or the one named by `primary`) becomes
+    /// the primary adapter; the rest are secondary and receive only commands for
+    /// platforms routed to them.
+    pub adapters: HashMap<String, AdapterConfig>,
+    /// Optional explicit primary adapter name. When unset the lexicographically
+    /// first adapter key is used.
+    pub primary: Option<String>,
+    /// Control-loop tick rate in Hz (poll → DCC → gate → dispatch). Default 20Hz.
+    pub tick_hz: f64,
+    /// Formation deployment role. Default `standalone` — single instance manages
+    /// a single platform. `lead`/`member` enable multi-instance federation.
+    pub fleet_role: FleetRole,
+    /// Side OpenFang/LLM acts for when tasking platforms in the slow loop.
+    /// Default `blue` — only Blue-force platforms are controlled unless overridden.
+    pub controlled_side: ControlledSide,
+    /// Side(s) treated as engagement threats when building opportunities.
+    pub threat_side: ThreatSide,
+    /// Own platform id the on-board control loop drives (DCC / single-machine).
+    /// DCC reflex rules authored with `"self"` are bound to this id at runtime.
+    pub own_platform_id: String,
+    /// Allow-list of platform ids the **slow cognitive loop** may task. Empty
+    /// (default) = no id restriction within [`Self::controlled_side`]. Set this
+    /// to pin which entities this node is allowed to actuate.
+    #[serde(default)]
+    pub controlled_platforms: Vec<String>,
+    /// Controller identity for audit logs and commander-intent attribution.
+    pub controller_id: String,
+    /// Weapon-release quorum required by the engagement pipeline.
+    pub weapon_quorum: u32,
+    /// Weapon approval window in seconds before a pending engagement expires.
+    pub approval_window_s: f64,
+    /// Re-engagement cooldown (seconds) per `(platform, weapon, track)`. The fast
+    /// loop replays the standing-plan fire every tick; this suppresses identical
+    /// fires within the window so a target is engaged once per cooldown rather
+    /// than ~20×/s. Default 20s.
+    #[serde(default = "default_engagement_cooldown_secs")]
+    pub engagement_cooldown_secs: f64,
+    /// Optional per-weapon cooldown overrides. Keys may be concrete component
+    /// ids (`loiter_wave3`, `gun_30mm`) or broad weapon categories (`gun`,
+    /// `loiter`, `missile`, `torpedo`).
+    #[serde(default)]
+    pub weapon_cooldowns_secs: HashMap<String, f64>,
+    /// Optional per-weapon employment policy. Keys may be concrete component ids
+    /// (`loiter_wave3`), ArkSIM weapon types (`red_loiter_mun`), or categories
+    /// (`loiter`, `missile`, `gun`). Component id wins over type, then category.
+    #[serde(default)]
+    pub weapon_employment: HashMap<String, WeaponEmploymentRule>,
+    /// Initial Rules-of-Engagement weapon-release authority the control loop
+    /// boots with. Defaults to `weapons_hold` (fail-safe: no weapon may ever
+    /// reach an actuator). Set to `weapons_tight` for human-confirmed
+    /// engagement (the `authorized_target` intervention flow) or `weapons_free`
+    /// for autonomous release. This is the final SPGS interlock — under
+    /// `weapons_hold` every weapon command is rejected regardless of approval.
+    #[serde(default = "default_weapon_release_authority")]
+    pub weapon_release_authority: crate::umaa::WeaponReleaseLevel,
+    /// Configurable human-intervention rules for slow cognition and fast gates.
+    pub intervention: InterventionConfig,
+    /// Slow cognitive-loop planning configuration (cognition → plan → tasks).
+    pub planning: PlanningConfig,
+    /// Tactical-workflow orchestration for the slow loop (brain). Disabled by
+    /// default; when enabled, drives the `WorkflowEngine` with scoped triggers.
+    pub workflows: WorkflowConfig,
+    /// Direct Command Channel (cerebellum) reflex configuration: enable switch,
+    /// built-in rule install toggle, and tunable evasion/response parameters.
+    #[serde(default)]
+    pub dcc: DccConfig,
+    /// Pre-planned contingency responses evaluated at the end of each slow-loop
+    /// cycle. Triggers (comm-lost, low-fuel, ROE/health change, platform-lost)
+    /// fire actions — notably `dcc_rule_enable`/`dcc_rule_disable` to (de)activate
+    /// reflex rules — closing the brain→cerebellum contingency loop.
+    #[serde(default)]
+    pub contingency_plans: Vec<crate::umaa::ContingencyPlan>,
+    /// Autonomy-mode envelope: declares the active operator profile and the
+    /// set of available profiles. Each profile gates which command classes may
+    /// auto-execute, which require human approval, and which are advisory.
+    /// Prompts can change reasoning style *within* a profile but never bypass
+    /// the profile's gate-side cap (`prompt soft constraint + gate hard constraint`).
+    #[serde(default)]
+    pub autonomy: AutonomyConfig,
+    /// Federation block (M4-U6). Declares the deterministic priority order
+    /// the federation engine uses to pick a leader and the staleness window
+    /// for dangerous commands queued during a link blackout.
+    #[serde(default)]
+    pub federation: FederationConfig,
+    /// MMS route-planning configuration (`[platform.maneuver]`).
+    #[serde(default)]
+    pub maneuver: ManeuverConfig,
+    /// SMS sensor policy configuration (`[platform.sensor_policy]`).
+    #[serde(default)]
+    pub sensor_policy: SensorPolicyConfig,
+    /// Named geographic zones for semantic navigation (`[[platform.geo_zones]]`).
+    #[serde(default)]
+    pub geo_zones: Vec<GeoZoneConfig>,
+}
+
+impl Default for PlatformConfig {
+    fn default() -> Self {
+        Self {
+            mode: PlatformMode::default(),
+            adapters: HashMap::new(),
+            primary: None,
+            tick_hz: 20.0,
+            fleet_role: FleetRole::Standalone,
+            controlled_side: ControlledSide::Blue,
+            threat_side: ThreatSide::Opposite,
+            own_platform_id: "self".to_string(),
+            controlled_platforms: Vec::new(),
+            controller_id: "openfang".to_string(),
+            weapon_quorum: 2,
+            approval_window_s: 30.0,
+            engagement_cooldown_secs: default_engagement_cooldown_secs(),
+            weapon_cooldowns_secs: HashMap::new(),
+            weapon_employment: HashMap::new(),
+            weapon_release_authority: default_weapon_release_authority(),
+            intervention: InterventionConfig::default(),
+            planning: PlanningConfig::default(),
+            workflows: WorkflowConfig::default(),
+            dcc: DccConfig::default(),
+            contingency_plans: Vec::new(),
+            autonomy: AutonomyConfig::default(),
+            federation: FederationConfig::default(),
+            maneuver: ManeuverConfig::default(),
+            sensor_policy: SensorPolicyConfig::default(),
+            geo_zones: Vec::new(),
+        }
+    }
+}
+
+impl FederationConfig {
+    /// Default staleness window (seconds) for queued dangerous commands.
+    /// 15s is short enough that a stale fire order from a 30s blackout is
+    /// dropped, long enough that brief jitter doesn't drop fresh intents.
+    pub const DEFAULT_STALE_COMMAND_WINDOW_S: f64 = 15.0;
+
+    /// Effective staleness window: clamps the configured value to the
+    /// recommended default when unset (`<= 0.0`).
+    pub fn effective_stale_window_s(&self) -> f64 {
+        if self.stale_command_window_s > 0.0 {
+            self.stale_command_window_s
+        } else {
+            Self::DEFAULT_STALE_COMMAND_WINDOW_S
+        }
+    }
+}
+
+// ─────────────────────────────────────────────
+// Autonomy mode profiles (Big-Brain ↔ Cerebellum envelope)
+// ─────────────────────────────────────────────
+
+/// How an autonomy profile treats weapon-class intents emitted by the brain.
+///
+/// This is the profile-level disposition; the per-engagement `WMS` quorum /
+/// `SPGS` ROE check still apply on top.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeaponDisposition {
+    /// LLM may only *suggest* weapon usage; no weapon intent reaches the gate.
+    SuggestOnly,
+    /// Weapon intents are deferred to the human-approval queue (default for
+    /// safe profiles).
+    #[default]
+    PendingApproval,
+    /// Weapon release may auto-flow through the standard SPGS/ROE/quorum
+    /// pipeline — used by `weapons_free_constrained`. The hard gates remain
+    /// authoritative.
+    AutoConstrained,
+}
+
+/// One autonomy mode profile — declares the envelope of "what is allowed to
+/// auto-execute" under this operational posture. See `docs/plan-uav-single.md`
+/// and the brain-architecture plan for the six recommended profiles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutonomyModeProfile {
+    /// Stable identifier (e.g. `observe_only`, `supervised_autonomy`,
+    /// `defensive_autonomy`, `weapons_free_constrained`, `formation_leader`,
+    /// `formation_member`).
+    pub id: String,
+    /// One-line human description for dashboards/audit.
+    pub description: String,
+    /// Command classes (tokens; see
+    /// [`crate::tactical::CommandClass::from_token`]) that auto-execute under
+    /// this profile (subject to capability + SPGS/ROE).
+    pub auto_classes: Vec<String>,
+    /// Command classes routed to the human-approval queue under this profile.
+    pub pending_approval_classes: Vec<String>,
+    /// Command classes whose intents are dropped at the boundary and recorded
+    /// as advisory only (no actuation).
+    pub advisory_classes: Vec<String>,
+    /// Disposition of weapon-class intents under this profile.
+    pub weapon_disposition: WeaponDisposition,
+    /// Upper bound on weapon release authority while this profile is active.
+    /// Intersected with the live ROE — the more restrictive wins.
+    pub max_weapon_release: crate::umaa::WeaponReleaseLevel,
+    /// Whether DCC `Critical` priority reflex intents (collision, RWR,
+    /// survivability) may auto-fire in this profile.
+    pub allow_defensive_reflex: bool,
+    /// Optional reference to the prompt template document used to brief LLMs
+    /// when this profile is active. Soft constraint — not enforced by the
+    /// gate.
+    pub prompt_template: Option<String>,
+}
+
+impl Default for AutonomyModeProfile {
+    fn default() -> Self {
+        // The default profile is the legacy *permissive* envelope used when
+        // no autonomy block is configured in `platform.toml`. It must be
+        // behaviour-equivalent to "no profile at all" so existing deployments
+        // do not silently change semantics when the autonomy layer compiles
+        // in. Concretely:
+        //   • Every class is dispatched as `Auto` (empty lists fall through),
+        //   • Weapons flow as `AutoConstrained` and remain subject to the
+        //     deterministic SPGS / ROE / quorum / target-auth gates,
+        //   • `max_weapon_release = WeaponsFree` so the live ROE wins the
+        //     intersection (the live ROE is still the safe default
+        //     `WeaponsHold`).
+        // Explicit profiles in `platform.toml` opt into the stricter defaults.
+        Self {
+            id: "default".to_string(),
+            description: "legacy permissive default (no envelope)".to_string(),
+            auto_classes: Vec::new(),
+            pending_approval_classes: Vec::new(),
+            advisory_classes: Vec::new(),
+            weapon_disposition: WeaponDisposition::AutoConstrained,
+            max_weapon_release: crate::umaa::WeaponReleaseLevel::WeaponsFree,
+            allow_defensive_reflex: true,
+            prompt_template: None,
+        }
+    }
+}
+
+impl AutonomyModeProfile {
+    /// Disposition of a [`crate::tactical::CommandClass`] under this profile.
+    /// Returns a [`AutonomyClassDisposition`] the gate / dispatcher uses to
+    /// decide whether to dispatch, queue for approval, or record as advisory.
+    pub fn disposition_for(
+        &self,
+        class: crate::tactical::CommandClass,
+    ) -> AutonomyClassDisposition {
+        let token = class.as_str();
+        // Weapon disposition is a class-specific override.
+        if class.is_weapon() {
+            return match self.weapon_disposition {
+                WeaponDisposition::SuggestOnly => AutonomyClassDisposition::Advisory,
+                WeaponDisposition::PendingApproval => AutonomyClassDisposition::PendingApproval,
+                WeaponDisposition::AutoConstrained => AutonomyClassDisposition::Auto,
+            };
+        }
+        let matches_token = |list: &[String]| {
+            list.iter()
+                .filter_map(|t| crate::tactical::CommandClass::from_token(t))
+                .any(|c| c == class)
+                || list.iter().any(|t| t.eq_ignore_ascii_case(token))
+        };
+        if matches_token(&self.advisory_classes) {
+            AutonomyClassDisposition::Advisory
+        } else if matches_token(&self.pending_approval_classes) {
+            AutonomyClassDisposition::PendingApproval
+        } else if matches_token(&self.auto_classes) {
+            AutonomyClassDisposition::Auto
+        } else if self.auto_classes.is_empty()
+            && self.pending_approval_classes.is_empty()
+            && self.advisory_classes.is_empty()
+        {
+            // Permissive default profile — no envelope configured.
+            AutonomyClassDisposition::Auto
+        } else {
+            // A non-empty profile that doesn't list this class is treated as
+            // "not allowed to auto-execute" → pending approval (safer default
+            // than silently dropping).
+            AutonomyClassDisposition::PendingApproval
+        }
+    }
+
+    /// Intersect this profile's `max_weapon_release` with the live ROE — the
+    /// more restrictive wins. Used by the SPGS profile-cap layer.
+    pub fn effective_weapon_release(
+        &self,
+        live: crate::umaa::WeaponReleaseLevel,
+    ) -> crate::umaa::WeaponReleaseLevel {
+        use crate::umaa::WeaponReleaseLevel::*;
+        // Order from most restrictive to least: Hold < Tight < Free.
+        let rank = |l: crate::umaa::WeaponReleaseLevel| match l {
+            WeaponsHold => 0u8,
+            WeaponsTight => 1,
+            WeaponsFree => 2,
+        };
+        if rank(self.max_weapon_release) <= rank(live) {
+            self.max_weapon_release
+        } else {
+            live
+        }
+    }
+}
+
+/// Profile-level disposition for a single [`crate::tactical::CommandClass`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutonomyClassDisposition {
+    /// Auto-execute through the standard SPGS/ROE pipeline.
+    Auto,
+    /// Route to the human-approval queue before dispatch.
+    PendingApproval,
+    /// Drop at the boundary and record as advisory (no actuation).
+    Advisory,
+}
+
+/// Autonomy-mode configuration block under `[platform.autonomy]`. Declares the
+/// active profile id and the full set of available profiles.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutonomyConfig {
+    /// Id of the currently active profile. Empty / missing = legacy
+    /// permissive default. Hot-reloadable via the config reload subsystem.
+    pub active_profile: String,
+    /// Available profiles. Looked up by `id`. When empty, the default profile
+    /// (legacy permissive) applies.
+    pub profiles: Vec<AutonomyModeProfile>,
+    /// Profile id the platform auto-degrades to when CMS reports the link is
+    /// `Poor`/`Lost` (M4-U6). Empty/`None` ⇒ no auto-degradation. Typically
+    /// `defensive_autonomy` so a member that loses its leader keeps
+    /// self-defense reflexes without auto-engaging.
+    pub degraded_profile: Option<String>,
+}
+
+impl AutonomyConfig {
+    /// Look up the active profile. Falls back to a permissive default when
+    /// the configured id is unknown.
+    pub fn active(&self) -> AutonomyModeProfile {
+        if self.active_profile.is_empty() {
+            return AutonomyModeProfile::default();
+        }
+        self.profiles
+            .iter()
+            .find(|p| p.id == self.active_profile)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Look up a profile by id.
+    pub fn profile(&self, id: &str) -> Option<&AutonomyModeProfile> {
+        self.profiles.iter().find(|p| p.id == id)
+    }
+}
+
+/// Federation configuration block under `[platform.federation]` (M4-U6).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FederationConfig {
+    /// Stable ordered priority list of fleet member ids. `priority_order[0]`
+    /// is the preferred leader when healthy; the next healthy id is the
+    /// failover designate.
+    pub priority_order: Vec<String>,
+    /// Optional explicit local member id. Empty ⇒ caller passes `own_platform_id`.
+    pub member_id: String,
+    /// Max age (seconds) for queued dangerous commands after link recovery.
+    pub stale_command_window_s: f64,
+}
+
+/// MMS maneuver / route-planning configuration (`[platform.maneuver]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ManeuverConfig {
+    pub enabled: bool,
+    pub min_turn_radius_m: f64,
+    pub max_climb_rate_ms: f64,
+    pub cruise_alt_m: f64,
+    pub replan_cross_track_m: f64,
+    /// Hold-distance to the final waypoint before suppressing replans.
+    pub arrival_radius_m: f64,
+    /// Stale-plan safety bound — force a replan after this many seconds even
+    /// without an event trigger. Must exceed the control tick interval.
+    pub replan_interval_s: f64,
+    pub cpa_min_m: f64,
+    pub cpa_max_tcpa_s: f64,
+    pub threat_avoid_weight: f64,
+}
+
+impl Default for ManeuverConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_turn_radius_m: 50.0,
+            max_climb_rate_ms: 5.0,
+            cruise_alt_m: 120.0,
+            replan_cross_track_m: 80.0,
+            arrival_radius_m: 50.0,
+            replan_interval_s: 120.0,
+            cpa_min_m: 200.0,
+            cpa_max_tcpa_s: 60.0,
+            threat_avoid_weight: 0.0,
+        }
+    }
+}
+
+/// Named geographic zone (`[[platform.geo_zones]]`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GeoZoneConfig {
+    pub id: String,
+    #[serde(default = "default_geo_zone_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub polygon: Vec<(f64, f64)>,
+    #[serde(default)]
+    pub point: Option<(f64, f64)>,
+    #[serde(default = "default_alt_band")]
+    pub alt_band_m: [f64; 2],
+    #[serde(default)]
+    pub patrol_pattern: Option<String>,
+}
+
+fn default_geo_zone_kind() -> String {
+    "area".into()
+}
+
+fn default_alt_band() -> [f64; 2] {
+    [0.0, 10_000.0]
+}
+
+impl GeoZoneConfig {
+    pub fn effective_alt_band(&self) -> (f64, f64) {
+        (self.alt_band_m[0], self.alt_band_m[1])
+    }
+}
+
+/// Configuration for the slow cognitive planning loop.
+///
+/// The loop runs rule-based cognition and planning by default. When
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LabelResolutionMode {
+    /// Resolve labels into candidates but wait for operator confirmation before
+    /// mutating commander intent target tracks.
+    #[default]
+    Confirm,
+    /// Merge resolved labels into `priority_tracks` automatically. Commands
+    /// still pass through mission approval, weapon release, and ROE gates.
+    AutoGate,
+}
+
+/// How a compiled [`crate::mission_dsl::MissionDsl`] is dispatched from the slow
+/// loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DslCompileMode {
+    /// Hold the compiled mission for operator confirmation before dispatch.
+    #[default]
+    Confirm,
+    /// Dispatch the compiled mission's functions straight to the fast loop.
+    /// Lethal functions still pass mission-approval, weapon, ROE and standoff
+    /// gates.
+    AutoGate,
+}
+
+/// [`PlanningConfig::llm_refine`] is enabled, an LLM may *re-prioritize among
+/// the rule-validated engagement opportunities* — it can never invent targets.
+/// Any LLM failure (timeout, parse error, missing key) falls back to the
+/// deterministic rule plan.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlanningConfig {
+    /// Master switch for the slow cognitive loop. Disabled by default so
+    /// existing fast-loop-only deployments are unaffected.
+    pub enabled: bool,
+    /// Periodic re-planning cadence in seconds (the hybrid periodic trigger).
+    pub interval_secs: f64,
+    /// Resolve semantic commander labels (e.g. "blue command post") against
+    /// the current snapshot before the planner filters by `priority_tracks`.
+    pub label_resolve: bool,
+    /// Whether resolved semantic labels require operator confirmation or are
+    /// merged immediately into the existing gated planning path.
+    pub label_resolution_mode: LabelResolutionMode,
+    /// Whether to invoke the LLM refiner on top of the rule-based plan.
+    pub llm_refine: bool,
+    /// Provider for the planning LLM (`custom`, `openai`, `groq`, …).
+    /// When unset, falls back to [`KernelConfig::default_model`].
+    pub llm_provider: Option<String>,
+    /// Model id for the planning LLM. `None` uses the kernel default model.
+    pub llm_model: Option<String>,
+    /// OpenAI-compatible base URL for the planning LLM (e.g. custom endpoint).
+    pub llm_base_url: Option<String>,
+    /// API key for the planning LLM. When empty, the refiner falls back to
+    /// `default_model.api_key_env` or no key (local inference).
+    pub llm_api_key: String,
+    /// Hard timeout for a single planning LLM call, in seconds.
+    pub llm_timeout_secs: u64,
+    /// Master switch for natural-language → Mission DSL compilation in the slow
+    /// loop. Disabled by default so existing deployments are unaffected.
+    pub dsl_compile: bool,
+    /// Whether a compiled mission requires operator confirmation or is gated and
+    /// dispatched immediately.
+    pub dsl_mode: DslCompileMode,
+    /// Whether the intent extractor may fall back to the LLM for free-form
+    /// intents the deterministic keyword layer cannot classify.
+    pub dsl_llm_extract: bool,
+    /// Inject the `mc/promt.md` planning doctrine as a system-prompt prefix for
+    /// the LLM intent extractor. The strict JSON output contract still has
+    /// final say (it is appended last). Off by default: the bundled doctrine is
+    /// large and can degrade JSON compliance on small local models. Enable for
+    /// deployments that want the `mc` doctrine to steer DSL compilation.
+    #[serde(default)]
+    pub dsl_doctrine_inject: bool,
+    /// Default standoff distance (meters) injected when intent omits one.
+    pub default_standoff_m: f64,
+    /// Require positive identification before any kinetic action.
+    pub pid_required: bool,
+    /// Minimum extraction/compilation confidence to auto-gate a mission.
+    pub confidence_threshold: f64,
+    /// Allow the slow LLM loop to AUTHORIZE fire targets autonomously. Default
+    /// `false` ⇒ the brain only *proposes* authorizations and a human confirms
+    /// via the authorize API. When `true`, the brain writes authorizations to
+    /// the registry — but ONLY when ROE is `weapons_free`; under tighter ROE the
+    /// proposal still requires a human. This never bypasses the CommandGate.
+    #[serde(default)]
+    pub llm_target_authorization: bool,
+}
+
+impl Default for PlanningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 5.0,
+            label_resolve: false,
+            label_resolution_mode: LabelResolutionMode::Confirm,
+            llm_refine: false,
+            llm_provider: None,
+            llm_model: None,
+            llm_base_url: None,
+            llm_api_key: String::new(),
+            llm_timeout_secs: 20,
+            dsl_compile: false,
+            dsl_mode: DslCompileMode::Confirm,
+            dsl_llm_extract: true,
+            dsl_doctrine_inject: false,
+            default_standoff_m: 3000.0,
+            pid_required: true,
+            confidence_threshold: 0.5,
+            llm_target_authorization: false,
+        }
+    }
+}
+
+/// SECURITY: redact planning LLM API key in logs.
+impl std::fmt::Debug for PlanningConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlanningConfig")
+            .field("enabled", &self.enabled)
+            .field("interval_secs", &self.interval_secs)
+            .field("label_resolve", &self.label_resolve)
+            .field("label_resolution_mode", &self.label_resolution_mode)
+            .field("llm_refine", &self.llm_refine)
+            .field("llm_provider", &self.llm_provider)
+            .field("llm_model", &self.llm_model)
+            .field("llm_base_url", &self.llm_base_url)
+            .field(
+                "llm_api_key",
+                &if self.llm_api_key.is_empty() {
+                    "<empty>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("llm_timeout_secs", &self.llm_timeout_secs)
+            .field("dsl_compile", &self.dsl_compile)
+            .field("dsl_mode", &self.dsl_mode)
+            .field("dsl_llm_extract", &self.dsl_llm_extract)
+            .field("dsl_doctrine_inject", &self.dsl_doctrine_inject)
+            .field("default_standoff_m", &self.default_standoff_m)
+            .field("pid_required", &self.pid_required)
+            .field("confidence_threshold", &self.confidence_threshold)
+            .field("llm_target_authorization", &self.llm_target_authorization)
+            .finish()
+    }
+}
+
+impl PlanningConfig {
+    /// Whether `[platform.planning]` specifies its own LLM endpoint credentials.
+    ///
+    /// When `false`, callers should reuse the kernel [`default_model`] driver instead
+    /// of opening a second HTTP channel to the same provider.
+    pub fn endpoint_overrides_default(&self) -> bool {
+        self.llm_provider.is_some() || self.llm_base_url.is_some() || !self.llm_api_key.is_empty()
+    }
+
+    /// Model id for planning LLM calls. Falls back to [`DefaultModelConfig::model`].
+    pub fn resolved_llm_model(&self, default_model: &DefaultModelConfig) -> String {
+        self.llm_model
+            .clone()
+            .unwrap_or_else(|| default_model.model.clone())
+    }
+
+    /// Resolved planning-LLM endpoint (provider, api_key, base_url).
+    /// Planning fields override [`DefaultModelConfig`] when set.
+    pub fn resolved_llm_endpoint(
+        &self,
+        default_model: &DefaultModelConfig,
+    ) -> (String, Option<String>, Option<String>) {
+        let provider = self
+            .llm_provider
+            .clone()
+            .unwrap_or_else(|| default_model.provider.clone());
+        let api_key = if !self.llm_api_key.is_empty() {
+            Some(self.llm_api_key.clone())
+        } else if !default_model.api_key_env.is_empty() {
+            std::env::var(&default_model.api_key_env).ok()
+        } else {
+            None
+        };
+        let base_url = self
+            .llm_base_url
+            .clone()
+            .or_else(|| default_model.base_url.clone());
+        (provider, api_key, base_url)
+    }
+}
+
+/// Configuration for stage-keyed human intervention in the cognition/control loop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InterventionConfig {
+    pub default_mode: InterventionMode,
+    pub rules: Vec<InterventionRule>,
+}
+
+impl Default for InterventionConfig {
+    fn default() -> Self {
+        Self {
+            default_mode: InterventionMode::RoeDriven,
+            rules: Vec::new(),
+        }
+    }
+}
+
+/// One ordered intervention rule. Empty match lists mean "any".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InterventionRule {
+    pub stage: Vec<String>,
+    pub platform_ids: Vec<String>,
+    pub command_classes: Vec<String>,
+    pub sources: Vec<String>,
+    pub mode: InterventionMode,
+    pub quorum: u32,
+    pub window_s: f64,
+}
+
+impl Default for InterventionRule {
+    fn default() -> Self {
+        Self {
+            stage: Vec::new(),
+            platform_ids: Vec::new(),
+            command_classes: Vec::new(),
+            sources: Vec::new(),
+            mode: InterventionMode::RoeDriven,
+            quorum: 1,
+            window_s: 30.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterventionMode {
+    Auto,
+    Confirm,
+    Quorum,
+    AuthorizedTarget,
+    Deny,
+    #[default]
+    RoeDriven,
+}
+
+impl PlatformConfig {
+    /// Resolve the primary adapter name: explicit `primary`, else the
+    /// lexicographically first adapter key.
+    pub fn primary_name(&self) -> Option<String> {
+        if let Some(p) = &self.primary {
+            if self.adapters.contains_key(p) {
+                return Some(p.clone());
+            }
+        }
+        let mut keys: Vec<&String> = self.adapters.keys().collect();
+        keys.sort();
+        keys.first().map(|s| (*s).clone())
+    }
+
+    /// Whether the platform layer should be wired at all.
+    pub fn is_enabled(&self) -> bool {
+        self.mode != PlatformMode::Disabled && !self.adapters.is_empty()
+    }
+
+    /// Build the runtime control policy consumed by cognition and planning.
+    pub fn control_policy(&self) -> PlatformControlPolicy {
+        PlatformControlPolicy {
+            controlled_side: self.controlled_side,
+            threat_side: self.threat_side,
+            controlled_platforms: self.controlled_platforms.clone(),
+            own_platform_id: self.own_platform_id.clone(),
+            controller_id: self.controller_id.clone(),
+            weapon_employment: self.weapon_employment.clone(),
+        }
+    }
+}
+
+/// Platform deployment mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlatformMode {
+    /// No platform wiring (default for non-tactical deployments).
+    #[default]
+    Disabled,
+    /// Single simulation backend (e.g. ArkSIM).
+    Simulation,
+    /// Single hardware backend (e.g. DDS bus / MAVLink flight controller).
+    Hardware,
+    /// Primary + secondary adapters routed per platform id.
+    Hybrid,
+}
+
+/// A single platform adapter's configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdapterConfig {
+    /// Adapter backend type: `"arksim" | "dds" | "mavlink" | "mock" | "noop"`.
+    #[serde(rename = "type")]
+    pub adapter_type: String,
+    /// Backend host.
+    pub host: String,
+    /// Legacy backend port. ArkSIM ArkService uses [`arksim_service_port`].
+    pub port: u16,
+    /// DDS domain id (DDS backend only).
+    pub domain_id: u32,
+    /// Platform ids this adapter is responsible for (hybrid routing).
+    pub platforms: Vec<String>,
+    /// Per-step poll timeout (seconds).
+    pub step_timeout_secs: u64,
+    /// ArkService ZMQ ROUTER/DEALER port for simulation control, entity
+    /// control, and customized situation observation.
+    pub arksim_service_port: u16,
+    /// 定制态势推送间隔（秒），对应 `customizedsituation.time`。默认 3.0。
+    pub situation_interval_secs: f64,
+    /// `warlock_direct` (18000 ZMQ PAIR, no uuid) or `ark_service` (60004 JSON).
+    /// When unset: `scenario_path` or `arksim_uuid` → ark_service, else warlock_direct.
+    #[serde(default)]
+    pub arksim_transport: Option<String>,
+    /// When set, attach to this running ArkService session (ArkService path only).
+    #[serde(default)]
+    pub arksim_uuid: Option<String>,
+    /// Scenario path for ArkService `start` (ArkService path only).
+    pub scenario_path: Option<String>,
+    /// Optional ArkSIM scenario component manifest. This is a stable component
+    /// tree fallback (sensors/weapons/comms/mover), not a source of dynamic
+    /// track ids.
+    #[serde(default)]
+    pub component_manifest_path: Option<String>,
+    /// ArkSIM Warlock direct: automatically emit `SetOutsideControl(self)` before
+    /// part/weapon commands whose platform id is the literal self alias. Keep
+    /// false unless the scenario/plugin has been verified to route action 0
+    /// correctly for `self`.
+    #[serde(default)]
+    pub auto_outside_control_self: bool,
+}
+
+impl Default for AdapterConfig {
+    fn default() -> Self {
+        Self {
+            adapter_type: "mock".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            domain_id: 0,
+            platforms: Vec::new(),
+            step_timeout_secs: 5,
+            arksim_service_port: 60004,
+            situation_interval_secs: 3.0,
+            arksim_transport: None,
+            arksim_uuid: None,
+            scenario_path: None,
+            component_manifest_path: None,
+            auto_outside_control_self: false,
         }
     }
 }
@@ -1261,7 +2524,6 @@ impl std::fmt::Debug for KernelConfig {
                 &format!("{} provider(s)", self.fallback_providers.len()),
             )
             .field("browser", &self.browser)
-            .field("extensions", &self.extensions)
             .field("vault", &format!("enabled={}", self.vault.enabled))
             .field("workspaces_dir", &self.workspaces_dir)
             .field(
@@ -1318,6 +2580,106 @@ fn openfang_home_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join(".openfang")
+}
+
+/// llama.cpp local inference server configuration.
+///
+/// When `enabled = true`, the kernel spawns `llama-server` at boot (unless
+/// `external = true`) and wires `[default_model]` to its OpenAI-compatible API.
+///
+/// ```toml
+/// [llamacpp]
+/// enabled = true
+/// model_path = "D:/models/qwen3-8b-q4_k_m.gguf"
+/// # binary_path = "E:/dev/openfang/public/llamaCPP/llama-server.exe"
+/// host = "127.0.0.1"
+/// port = 8080
+///
+/// [default_model]
+/// provider = "llamacpp"
+/// model = "qwen3-8b-q4_k_m"
+/// api_key_env = ""
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LlamaCppConfig {
+    /// Spawn and manage llama-server at kernel boot.
+    pub enabled: bool,
+    /// Path to `llama-server` binary. When unset, auto-detect bundled `public/llamaCPP`.
+    pub binary_path: Option<PathBuf>,
+    /// Path to the GGUF model file to load (`-m`).
+    pub model_path: PathBuf,
+    /// Listen address for llama-server (`--host`).
+    #[serde(default = "default_llamacpp_host")]
+    pub host: String,
+    /// Listen port for llama-server (`--port`).
+    #[serde(default = "default_llamacpp_port")]
+    pub port: u16,
+    /// Prompt context size (`-c`). Omit to use model default.
+    pub ctx_size: Option<u32>,
+    /// CPU thread count (`-t`). Omit for llama.cpp default.
+    pub threads: Option<u32>,
+    /// GPU layers to offload (`-ngl`). Omit for CPU-only.
+    pub n_gpu_layers: Option<i32>,
+    /// Extra arguments appended to the llama-server command line.
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    /// Seconds to wait for the server HTTP endpoint during boot.
+    #[serde(default = "default_llamacpp_startup_timeout")]
+    pub startup_timeout_secs: u64,
+    /// When true, do not spawn a process — assume llama-server is already running.
+    pub external: bool,
+}
+
+fn default_llamacpp_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_llamacpp_port() -> u16 {
+    8080
+}
+
+fn default_llamacpp_startup_timeout() -> u64 {
+    600
+}
+
+impl Default for LlamaCppConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            binary_path: None,
+            model_path: PathBuf::new(),
+            host: default_llamacpp_host(),
+            port: default_llamacpp_port(),
+            ctx_size: None,
+            threads: None,
+            n_gpu_layers: None,
+            extra_args: Vec::new(),
+            startup_timeout_secs: default_llamacpp_startup_timeout(),
+            external: false,
+        }
+    }
+}
+
+impl LlamaCppConfig {
+    /// Whether llama.cpp integration is configured for use.
+    pub fn is_active(&self) -> bool {
+        self.enabled && !self.model_path.as_os_str().is_empty()
+    }
+
+    /// OpenAI-compatible base URL for this server instance.
+    pub fn base_url(&self) -> String {
+        format!("http://{}:{}/v1", self.host, self.port)
+    }
+
+    /// Derive a model id from the GGUF filename (stem).
+    pub fn resolved_model_name(&self) -> String {
+        self.model_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("local-model")
+            .to_string()
+    }
 }
 
 /// Default LLM model configuration.
@@ -3218,6 +4580,157 @@ mod tests {
     use super::*;
 
     #[test]
+    fn autonomy_default_profile_is_permissive() {
+        let cfg = AutonomyConfig::default();
+        let active = cfg.active();
+        assert_eq!(active.id, "default");
+        // The legacy default profile has no envelope → every class auto-routes.
+        assert_eq!(
+            active.disposition_for(crate::tactical::CommandClass::Motion),
+            AutonomyClassDisposition::Auto,
+        );
+    }
+
+    #[test]
+    fn autonomy_observe_only_marks_motion_advisory() {
+        let cfg = AutonomyConfig {
+            active_profile: "observe_only".into(),
+            profiles: vec![AutonomyModeProfile {
+                id: "observe_only".into(),
+                description: "operator observes; LLM only suggests".into(),
+                advisory_classes: vec!["motion".into(), "sensor".into(), "weapon".into()],
+                weapon_disposition: WeaponDisposition::SuggestOnly,
+                ..Default::default()
+            }],
+            degraded_profile: None,
+        };
+        let active = cfg.active();
+        assert_eq!(
+            active.disposition_for(crate::tactical::CommandClass::Motion),
+            AutonomyClassDisposition::Advisory,
+        );
+        assert_eq!(
+            active.disposition_for(crate::tactical::CommandClass::Weapon),
+            AutonomyClassDisposition::Advisory,
+        );
+    }
+
+    #[test]
+    fn autonomy_supervised_pends_weapons_routes_motion_auto() {
+        let cfg = AutonomyConfig {
+            active_profile: "supervised_autonomy".into(),
+            profiles: vec![AutonomyModeProfile {
+                id: "supervised_autonomy".into(),
+                auto_classes: vec!["motion".into(), "sensor".into(), "comm".into()],
+                weapon_disposition: WeaponDisposition::PendingApproval,
+                ..Default::default()
+            }],
+            degraded_profile: None,
+        };
+        let active = cfg.active();
+        assert_eq!(
+            active.disposition_for(crate::tactical::CommandClass::Motion),
+            AutonomyClassDisposition::Auto,
+        );
+        assert_eq!(
+            active.disposition_for(crate::tactical::CommandClass::Weapon),
+            AutonomyClassDisposition::PendingApproval,
+        );
+        // Classes not in any list under a non-empty profile fall back to PendingApproval.
+        assert_eq!(
+            active.disposition_for(crate::tactical::CommandClass::ElectronicWarfare),
+            AutonomyClassDisposition::PendingApproval,
+        );
+    }
+
+    #[test]
+    fn autonomy_weapon_release_intersected_with_live_roe() {
+        let profile = AutonomyModeProfile {
+            id: "tight_profile".into(),
+            max_weapon_release: crate::umaa::WeaponReleaseLevel::WeaponsTight,
+            ..Default::default()
+        };
+        // Live ROE is Free → profile cap (Tight) wins.
+        assert_eq!(
+            profile.effective_weapon_release(crate::umaa::WeaponReleaseLevel::WeaponsFree),
+            crate::umaa::WeaponReleaseLevel::WeaponsTight,
+        );
+        // Live ROE is Hold (more restrictive) → live wins.
+        assert_eq!(
+            profile.effective_weapon_release(crate::umaa::WeaponReleaseLevel::WeaponsHold),
+            crate::umaa::WeaponReleaseLevel::WeaponsHold,
+        );
+    }
+
+    #[test]
+    fn autonomy_serde_roundtrip() {
+        let cfg = AutonomyConfig {
+            active_profile: "defensive_autonomy".into(),
+            profiles: vec![AutonomyModeProfile {
+                id: "defensive_autonomy".into(),
+                description: "emergency self-defense reflexes".into(),
+                auto_classes: vec!["motion".into(), "electronic_warfare".into()],
+                pending_approval_classes: vec!["weapon".into()],
+                advisory_classes: vec![],
+                weapon_disposition: WeaponDisposition::PendingApproval,
+                max_weapon_release: crate::umaa::WeaponReleaseLevel::WeaponsTight,
+                allow_defensive_reflex: true,
+                prompt_template: Some("profiles/defensive.md".into()),
+            }],
+            degraded_profile: Some("defensive_autonomy".into()),
+        };
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        assert!(toml_str.contains("defensive_autonomy"));
+        let back: AutonomyConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(back.active_profile, "defensive_autonomy");
+        assert_eq!(back.profiles.len(), 1);
+        assert_eq!(back.degraded_profile.as_deref(), Some("defensive_autonomy"));
+    }
+
+    #[test]
+    fn autonomy_unknown_active_id_falls_back_to_default() {
+        let cfg = AutonomyConfig {
+            active_profile: "no_such_profile".into(),
+            profiles: vec![AutonomyModeProfile {
+                id: "supervised_autonomy".into(),
+                ..Default::default()
+            }],
+            degraded_profile: None,
+        };
+        let active = cfg.active();
+        assert_eq!(active.id, "default");
+    }
+
+    #[test]
+    fn planning_endpoint_overrides_default() {
+        let default_model = DefaultModelConfig {
+            provider: "lmstudio".to_string(),
+            model: "google/gemma-4-26b-a4b".to_string(),
+            ..Default::default()
+        };
+        let inherited = PlanningConfig {
+            enabled: true,
+            llm_refine: true,
+            ..PlanningConfig::default()
+        };
+        assert!(!inherited.endpoint_overrides_default());
+        assert_eq!(
+            inherited.resolved_llm_model(&default_model),
+            "google/gemma-4-26b-a4b"
+        );
+        assert_eq!(
+            inherited.resolved_llm_endpoint(&default_model).0,
+            "lmstudio"
+        );
+
+        let overridden = PlanningConfig {
+            llm_provider: Some("custom".to_string()),
+            ..PlanningConfig::default()
+        };
+        assert!(overridden.endpoint_overrides_default());
+    }
+
+    #[test]
     fn test_default_config() {
         let config = KernelConfig::default();
         assert_eq!(config.log_level, "info");
@@ -3230,6 +4743,73 @@ mod tests {
         let config = KernelConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         assert!(toml_str.contains("log_level"));
+    }
+
+    #[test]
+    fn test_platform_controlled_side_red_serde() {
+        let cfg: PlatformConfig = toml::from_str(
+            r#"
+            controlled_side = "red"
+            threat_side = "blue"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(cfg.controlled_side, ControlledSide::Red);
+        assert_eq!(cfg.threat_side, ThreatSide::Blue);
+        assert!(cfg
+            .controlled_side
+            .matches(crate::platform::Affiliation::Red));
+        assert!(!cfg
+            .controlled_side
+            .matches(crate::platform::Affiliation::Blue));
+        assert!(cfg
+            .threat_side
+            .is_threat_for(cfg.controlled_side, crate::platform::Affiliation::Blue));
+        assert!(!cfg
+            .threat_side
+            .is_threat_for(cfg.controlled_side, crate::platform::Affiliation::Red));
+    }
+
+    #[test]
+    fn opposite_threat_side_is_relative_to_controlled_side() {
+        use crate::platform::Affiliation;
+        // Red controls → blue/friend are threats, red itself is not.
+        let red = PlatformControlPolicy {
+            controlled_side: ControlledSide::Red,
+            threat_side: ThreatSide::Opposite,
+            ..Default::default()
+        };
+        assert!(red.track_is_threat(Affiliation::Blue, "unknown"));
+        assert!(red.track_is_threat(Affiliation::Friend, "unknown"));
+        assert!(!red.track_is_threat(Affiliation::Red, "unknown"));
+
+        // Blue controls → red is the threat, blue/friend are not.
+        let blue = PlatformControlPolicy {
+            controlled_side: ControlledSide::Blue,
+            threat_side: ThreatSide::Opposite,
+            ..Default::default()
+        };
+        assert!(blue.track_is_threat(Affiliation::Red, "unknown"));
+        assert!(!blue.track_is_threat(Affiliation::Blue, "unknown"));
+        assert!(!blue.track_is_threat(Affiliation::Friend, "unknown"));
+    }
+
+    #[test]
+    fn hostile_iff_flags_unknown_side_tracks() {
+        use crate::platform::Affiliation;
+        // ArkSIM sensor tracks often carry only an IFF verdict (no ground-truth
+        // side) — a foe/敌方 contact must still register as a threat.
+        let policy = PlatformControlPolicy {
+            controlled_side: ControlledSide::Red,
+            threat_side: ThreatSide::Opposite,
+            ..Default::default()
+        };
+        assert!(policy.track_is_threat(Affiliation::Unknown, "foe"));
+        assert!(policy.track_is_threat(Affiliation::Unknown, "敌方"));
+        // Friendly IFF protects a track even if its side would otherwise match.
+        assert!(!policy.track_is_threat(Affiliation::Blue, "friend"));
+        assert!(!policy.track_is_threat(Affiliation::Blue, "友军"));
     }
 
     #[test]
@@ -3298,6 +4878,138 @@ mod tests {
         };
         assert_eq!(config.mode, KernelMode::Stable);
         assert_eq!(config.language, "ar");
+    }
+
+    #[test]
+    fn test_platform_intervention_defaults_to_roe_driven() {
+        let config = PlatformConfig::default();
+        assert_eq!(
+            config.intervention.default_mode,
+            InterventionMode::RoeDriven
+        );
+        assert!(config.intervention.rules.is_empty());
+    }
+
+    #[test]
+    fn test_weapon_release_authority_defaults_to_hold_and_parses() {
+        // Fail-safe default: no weapon release until explicitly raised.
+        let config = PlatformConfig::default();
+        assert_eq!(
+            config.weapon_release_authority,
+            crate::umaa::WeaponReleaseLevel::WeaponsHold
+        );
+
+        // Config can raise the posture so the fire chain can actually close.
+        let toml_str = r#"
+            [platform]
+            weapon_release_authority = "weapons_tight"
+        "#;
+        let parsed: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            parsed.platform.weapon_release_authority,
+            crate::umaa::WeaponReleaseLevel::WeaponsTight
+        );
+    }
+
+    #[test]
+    fn test_label_resolution_defaults_to_confirm_and_parses_auto_gate() {
+        let config = PlatformConfig::default();
+        assert!(!config.planning.label_resolve);
+        assert_eq!(
+            config.planning.label_resolution_mode,
+            LabelResolutionMode::Confirm
+        );
+
+        let toml_str = r#"
+            [platform.planning]
+            label_resolve = true
+            label_resolution_mode = "auto_gate"
+        "#;
+        let parsed: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert!(parsed.platform.planning.label_resolve);
+        assert_eq!(
+            parsed.platform.planning.label_resolution_mode,
+            LabelResolutionMode::AutoGate
+        );
+    }
+
+    #[test]
+    fn test_dsl_compile_defaults_and_parses() {
+        let config = PlatformConfig::default();
+        assert!(!config.planning.dsl_compile);
+        assert_eq!(config.planning.dsl_mode, DslCompileMode::Confirm);
+        assert!(config.planning.dsl_llm_extract);
+        assert_eq!(config.planning.default_standoff_m, 3000.0);
+        assert!(config.planning.pid_required);
+
+        let toml_str = r#"
+            [platform.planning]
+            dsl_compile = true
+            dsl_mode = "auto_gate"
+            dsl_llm_extract = false
+            default_standoff_m = 5000.0
+            pid_required = false
+            confidence_threshold = 0.75
+        "#;
+        let parsed: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert!(parsed.platform.planning.dsl_compile);
+        assert_eq!(parsed.platform.planning.dsl_mode, DslCompileMode::AutoGate);
+        assert!(!parsed.platform.planning.dsl_llm_extract);
+        assert_eq!(parsed.platform.planning.default_standoff_m, 5000.0);
+        assert!(!parsed.platform.planning.pid_required);
+        assert_eq!(parsed.platform.planning.confidence_threshold, 0.75);
+    }
+
+    #[test]
+    fn test_sensor_policy_defaults_and_parses() {
+        let config = PlatformConfig::default();
+        assert_eq!(
+            config.sensor_policy.active_radar_disposition,
+            SensorDisposition::Auto
+        );
+
+        let toml_str = r#"
+            [platform.sensor_policy]
+            active_radar_disposition = "pending_approval"
+
+            [[platform.sensor_policy.emcon_rules]]
+            emcon = "restricted"
+            sensor_type = "radar"
+            disposition = "force_off"
+        "#;
+        let parsed: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            parsed.platform.sensor_policy.active_radar_disposition,
+            SensorDisposition::PendingApproval
+        );
+        assert_eq!(parsed.platform.sensor_policy.emcon_rules.len(), 1);
+        assert_eq!(
+            parsed.platform.sensor_policy.emcon_rules[0].emcon,
+            SensorEmconLevel::Restricted
+        );
+    }
+
+    #[test]
+    fn test_platform_intervention_toml_roundtrip() {
+        let toml_str = r#"
+            [platform.intervention]
+            default_mode = "roe_driven"
+
+            [[platform.intervention.rules]]
+            stage = ["target_authorization", "weapon_release"]
+            platform_ids = ["usv-01"]
+            command_classes = ["weapon"]
+            sources = ["llm", "workflow"]
+            mode = "authorized_target"
+            quorum = 1
+            window_s = 15.0
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.platform.intervention.rules.len(), 1);
+        let rule = &config.platform.intervention.rules[0];
+        assert_eq!(rule.stage, vec!["target_authorization", "weapon_release"]);
+        assert_eq!(rule.mode, InterventionMode::AuthorizedTarget);
+        assert_eq!(rule.quorum, 1);
     }
 
     #[test]

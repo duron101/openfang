@@ -1,0 +1,29 @@
+[package]
+name = "openfang-platform-dds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DDS (Data Distribution Service) platform adapter — real-time hardware bus for unmanned systems"
+
+[dependencies]
+openfang-platform = { path = "../openfang-platform" }
+openfang-types = { path = "../openfang-types" }
+tokio = { workspace = true, features = ["sync", "time"] }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+dashmap = { workspace = true }
+
+[features]
+# Real RTPS transport via the rustdds crate. Off by default because it requires
+# a live DDS domain (multicast/HIL rig) and the rustdds dependency. The
+# LoopbackTransport provides the in-process vertical slice used for
+# contract-equivalence + smoke tests today; enabling this feature is the
+# remaining HIL wiring step (add the `rustdds` dependency + a RustDdsTransport).
+default = []
+rustdds-transport = []
+
+[dev-dependencies]
+tokio-test = { workspace = true }

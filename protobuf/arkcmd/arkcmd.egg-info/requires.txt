@@ -1,0 +1,4 @@
+protobuf>=5.0.0
+grpcio>=1.60.0
+pyzmq>=25.0.0
+numpy>=1.24.0

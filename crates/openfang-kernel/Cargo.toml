@@ -8,12 +8,14 @@ description = "Core kernel for the OpenFang Agent OS"
 [dependencies]
 openfang-types = { path = "../openfang-types" }
 openfang-memory = { path = "../openfang-memory" }
+openfang-platform = { path = "../openfang-platform" }
+openfang-platform-dds = { path = "../openfang-platform-dds", optional = true }
+openfang-platform-arksim = { path = "../openfang-platform-arksim", optional = true }
+openfang-platform-mavlink = { path = "../openfang-platform-mavlink", optional = true }
 openfang-runtime = { path = "../openfang-runtime" }
 openfang-skills = { path = "../openfang-skills" }
-openfang-hands = { path = "../openfang-hands" }
-openfang-extensions = { path = "../openfang-extensions" }
 openfang-wire = { path = "../openfang-wire" }
-openfang-channels = { path = "../openfang-channels" }
+rusqlite = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -31,8 +33,24 @@ futures = { workspace = true }
 subtle = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
 reqwest = { workspace = true }
 cron = "0.15"
+
+[features]
+# Tactical platform adapters are enabled by default so config-driven adapter
+# loading works out of the box. A minimal/headless build can disable them with
+# `--no-default-features`. Granular tactical profiles:
+#   tactical-uav        — single-machine autonomy (CCA / LSUAV)
+#   tactical-mothership — fleet / launch-recovery autonomy
+default = ["dds", "arksim"]
+dds = ["dep:openfang-platform-dds"]
+arksim = ["dep:openfang-platform-arksim"]
+mavlink = ["dep:openfang-platform-mavlink"]
+# Single-machine UAV autonomy pulls in the MAVLink autopilot link by default.
+tactical-uav = ["mavlink"]
+tactical-mothership = []
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

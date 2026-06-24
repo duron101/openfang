@@ -8,6 +8,15 @@ use openfang_types::approval::{
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+/// Quorum status for multi-signer approval requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuorumStatus {
+    Pending,
+    Approved,
+    Denied,
+    InvalidSig,
+}
+
 /// Max pending requests per agent.
 const MAX_PENDING_PER_AGENT: usize = 5;
 
@@ -20,6 +29,12 @@ pub struct ApprovalManager {
 struct PendingRequest {
     request: ApprovalRequest,
     sender: tokio::sync::oneshot::Sender<ApprovalDecision>,
+    /// Minimum number of signers required for quorum (default: 1 = single signer)
+    required_signers: usize,
+    /// Set of signer IDs who have approved
+    approvals: dashmap::DashSet<String>,
+    /// Set of signer IDs who have denied
+    denials: dashmap::DashSet<String>,
 }
 
 impl ApprovalManager {
@@ -56,8 +71,11 @@ impl ApprovalManager {
         self.pending.insert(
             id,
             PendingRequest {
-                request: req,
+                request: req.clone(),
                 sender: tx,
+                required_signers: 1,
+                approvals: dashmap::DashSet::new(),
+                denials: dashmap::DashSet::new(),
             },
         );
 
@@ -91,13 +109,91 @@ impl ApprovalManager {
                     decided_at: Utc::now(),
                     decided_by,
                 };
-                // Send decision to waiting agent (ignore error if receiver dropped)
                 let _ = pending.sender.send(decision);
                 info!(request_id = %request_id, ?decision, "Approval request resolved");
                 Ok(response)
             }
             None => Err(format!("No pending approval request with id {request_id}")),
         }
+    }
+
+    /// Submit a quorum-based approval request that requires multiple signers.
+    pub async fn request_approval_quorum(
+        &self,
+        req: ApprovalRequest,
+        required_signers: usize,
+    ) -> ApprovalDecision {
+        let agent_pending = self
+            .pending
+            .iter()
+            .filter(|r| r.value().request.agent_id == req.agent_id)
+            .count();
+        if agent_pending >= MAX_PENDING_PER_AGENT {
+            warn!(agent_id = %req.agent_id, "Quorum request rejected: too many pending");
+            return ApprovalDecision::Denied;
+        }
+
+        let timeout = std::time::Duration::from_secs(req.timeout_secs);
+        let id = req.id;
+        let req_clone = req.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        self.pending.insert(
+            id,
+            PendingRequest {
+                request: req_clone,
+                sender: tx,
+                required_signers,
+                approvals: dashmap::DashSet::new(),
+                denials: dashmap::DashSet::new(),
+            },
+        );
+
+        info!(request_id = %id, required_signers, "Quorum approval request submitted");
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(decision)) => {
+                debug!(request_id = %id, ?decision, "Quorum resolved");
+                decision
+            }
+            _ => {
+                self.pending.remove(&id);
+                warn!(request_id = %id, "Quorum request timed out");
+                ApprovalDecision::TimedOut
+            }
+        }
+    }
+
+    /// Add a signature to a quorum request. Returns the quorum status.
+    pub fn add_signature(
+        &self,
+        request_id: Uuid,
+        signer_id: &str,
+        approve: bool,
+    ) -> Result<QuorumStatus, String> {
+        let pending = self
+            .pending
+            .get(&request_id)
+            .ok_or_else(|| format!("No pending request with id {request_id}"))?;
+
+        if approve {
+            pending.approvals.insert(signer_id.to_string());
+        } else {
+            pending.denials.insert(signer_id.to_string());
+        }
+
+        // If any denial exists, quorum fails immediately
+        if !pending.denials.is_empty() {
+            // Clone to avoid moving out of DashMap entry
+            return Ok(QuorumStatus::Denied);
+        }
+
+        // Check if quorum is reached
+        if pending.approvals.len() >= pending.required_signers {
+            return Ok(QuorumStatus::Approved);
+        }
+
+        Ok(QuorumStatus::Pending)
     }
 
     /// List all pending requests (for API/dashboard display).
@@ -129,9 +225,11 @@ impl ApprovalManager {
     /// Classify the risk level of a tool invocation.
     pub fn classify_risk(tool_name: &str) -> RiskLevel {
         match tool_name {
-            "shell_exec" => RiskLevel::Critical,
-            "file_write" | "file_delete" => RiskLevel::High,
-            "web_fetch" | "browser_navigate" => RiskLevel::Medium,
+            "shell_exec" | "self_destruct" => RiskLevel::Critical,
+            "platform_fire_at_target" | "platform_fire_salvo" | "file_write" | "file_delete" => {
+                RiskLevel::High
+            }
+            "platform_jam_start" | "web_fetch" | "browser_navigate" => RiskLevel::Medium,
             _ => RiskLevel::Low,
         }
     }

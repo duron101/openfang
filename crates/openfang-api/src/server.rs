@@ -1,6 +1,5 @@
 //! OpenFang daemon server — boots the kernel and serves the HTTP API.
 
-use crate::channel_bridge;
 use crate::middleware;
 use crate::rate_limiter;
 use crate::routes::{self, AppState};
@@ -32,21 +31,16 @@ pub struct DaemonInfo {
 /// This is extracted from `run_daemon()` so that embedders (e.g. openfang-desktop)
 /// can create the router without starting the full daemon lifecycle.
 ///
-/// Returns `(router, shared_state)`. The caller can use `state.bridge_manager`
-/// to shut down the bridge on exit.
+/// Returns `(router, shared_state)`.
 pub async fn build_router(
     kernel: Arc<OpenFangKernel>,
     listen_addr: SocketAddr,
 ) -> (Router<()>, Arc<AppState>) {
-    // Start channel bridges (Telegram, etc.)
-    let bridge = channel_bridge::start_channel_bridge(kernel.clone()).await;
-
     let channels_config = kernel.config.channels.clone();
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
         peer_registry: kernel.peer_registry.as_ref().map(|r| Arc::new(r.clone())),
-        bridge_manager: tokio::sync::Mutex::new(bridge),
         channels_config: tokio::sync::RwLock::new(channels_config),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
@@ -229,10 +223,6 @@ pub async fn build_router(
             "/api/channels/{name}/test",
             axum::routing::post(routes::test_channel),
         )
-        .route(
-            "/api/channels/reload",
-            axum::routing::post(routes::reload_channels),
-        )
         // WhatsApp QR login flow
         .route(
             "/api/channels/whatsapp/qr/start",
@@ -329,54 +319,6 @@ pub async fn build_router(
             "/api/clawhub/install",
             axum::routing::post(routes::clawhub_install),
         )
-        // Hands endpoints
-        .route("/api/hands", axum::routing::get(routes::list_hands))
-        .route(
-            "/api/hands/install",
-            axum::routing::post(routes::install_hand),
-        )
-        .route(
-            "/api/hands/active",
-            axum::routing::get(routes::list_active_hands),
-        )
-        .route("/api/hands/{hand_id}", axum::routing::get(routes::get_hand))
-        .route(
-            "/api/hands/{hand_id}/activate",
-            axum::routing::post(routes::activate_hand),
-        )
-        .route(
-            "/api/hands/{hand_id}/check-deps",
-            axum::routing::post(routes::check_hand_deps),
-        )
-        .route(
-            "/api/hands/{hand_id}/install-deps",
-            axum::routing::post(routes::install_hand_deps),
-        )
-        .route(
-            "/api/hands/{hand_id}/settings",
-            axum::routing::get(routes::get_hand_settings)
-                .put(routes::update_hand_settings),
-        )
-        .route(
-            "/api/hands/instances/{id}/pause",
-            axum::routing::post(routes::pause_hand),
-        )
-        .route(
-            "/api/hands/instances/{id}/resume",
-            axum::routing::post(routes::resume_hand),
-        )
-        .route(
-            "/api/hands/instances/{id}",
-            axum::routing::delete(routes::deactivate_hand),
-        )
-        .route(
-            "/api/hands/instances/{id}/stats",
-            axum::routing::get(routes::hand_stats),
-        )
-        .route(
-            "/api/hands/instances/{id}/browser",
-            axum::routing::get(routes::hand_instance_browser),
-        )
         // MCP server endpoints
         .route(
             "/api/mcp/servers",
@@ -412,14 +354,8 @@ pub async fn build_router(
             "/api/comms/events/stream",
             axum::routing::get(routes::comms_events_stream),
         )
-        .route(
-            "/api/comms/send",
-            axum::routing::post(routes::comms_send),
-        )
-        .route(
-            "/api/comms/task",
-            axum::routing::post(routes::comms_task),
-        )
+        .route("/api/comms/send", axum::routing::post(routes::comms_send))
+        .route("/api/comms/task", axum::routing::post(routes::comms_task))
         // Tools endpoint
         .route("/api/tools", axum::routing::get(routes::list_tools))
         // Config endpoints
@@ -441,6 +377,90 @@ pub async fn build_router(
         .route(
             "/api/approvals/{id}/reject",
             axum::routing::post(routes::reject_request),
+        )
+        // Platform cognitive-loop endpoints
+        .route(
+            "/api/platform/intent",
+            axum::routing::post(routes::platform_submit_intent),
+        )
+        .route(
+            "/api/platform/pending",
+            axum::routing::get(routes::platform_pending),
+        )
+        .route(
+            "/api/platform/sensors",
+            axum::routing::get(routes::platform_sensors),
+        )
+        .route(
+            "/api/platform/label-resolutions",
+            axum::routing::get(routes::platform_label_resolutions),
+        )
+        .route(
+            "/api/platform/label-resolutions/{id}/confirm",
+            axum::routing::post(routes::platform_confirm_label_resolution),
+        )
+        .route(
+            "/api/platform/label-resolutions/{id}/dismiss",
+            axum::routing::post(routes::platform_dismiss_label_resolution),
+        )
+        // DSL mission pipeline (NL objective → Mission DSL → fast loop)
+        .route(
+            "/api/platform/intent/preview",
+            axum::routing::post(routes::platform_preview_intent),
+        )
+        .route(
+            "/api/platform/missions",
+            axum::routing::get(routes::platform_missions),
+        )
+        .route(
+            "/api/platform/missions/{id}/confirm",
+            axum::routing::post(routes::platform_confirm_mission),
+        )
+        .route(
+            "/api/platform/missions/{id}/dismiss",
+            axum::routing::post(routes::platform_dismiss_mission),
+        )
+        .route(
+            "/api/platform/approve",
+            axum::routing::post(routes::platform_approve),
+        )
+        .route(
+            "/api/platform/missions/approve",
+            axum::routing::post(routes::platform_approve_mission),
+        )
+        .route(
+            "/api/platform/targets/authorize",
+            axum::routing::post(routes::platform_authorize_target),
+        )
+        .route(
+            "/api/platform/engagements/{id}/sign",
+            axum::routing::post(routes::platform_sign_engagement),
+        )
+        // M3-U5: Autonomy profile and cerebellum service health
+        .route(
+            "/api/autonomy/profile",
+            axum::routing::get(routes::get_autonomy_profile).put(routes::put_autonomy_profile),
+        )
+        .route(
+            "/api/services/health",
+            axum::routing::get(routes::services_health),
+        )
+        .route(
+            "/api/maneuver/route",
+            axum::routing::get(routes::maneuver_route),
+        )
+        .route(
+            "/api/maneuver/objective",
+            axum::routing::post(routes::maneuver_objective),
+        )
+        // M4-U6: Fleet federation
+        .route(
+            "/api/federation/status",
+            axum::routing::get(routes::federation_status),
+        )
+        .route(
+            "/api/federation/link_quality",
+            axum::routing::put(routes::put_federation_link_quality),
         )
         // Usage endpoints
         .route("/api/usage", axum::routing::get(routes::usage_stats))
@@ -464,8 +484,7 @@ pub async fn build_router(
         )
         .route(
             "/api/budget/agents/{id}",
-            axum::routing::get(routes::agent_budget_status)
-                .put(routes::update_agent_budget),
+            axum::routing::get(routes::agent_budget_status).put(routes::update_agent_budget),
         )
         // Session endpoints
         .route("/api/sessions", axum::routing::get(routes::list_sessions))
@@ -485,6 +504,11 @@ pub async fn build_router(
         .route(
             "/api/agents/{id}/update",
             axum::routing::put(routes::update_agent),
+        )
+        // Agent prompt + skill hot-reload from disk
+        .route(
+            "/api/agents/{id}/reload",
+            axum::routing::post(routes::reload_agent),
         )
         // Security dashboard endpoint
         .route("/api/security", axum::routing::get(routes::security_status))
@@ -529,16 +553,6 @@ pub async fn build_router(
             "/api/skills/create",
             axum::routing::post(routes::create_skill),
         )
-        // Migration endpoints
-        .route(
-            "/api/migrate/detect",
-            axum::routing::get(routes::migrate_detect),
-        )
-        .route(
-            "/api/migrate/scan",
-            axum::routing::post(routes::migrate_scan),
-        )
-        .route("/api/migrate", axum::routing::post(routes::run_migrate))
         // Cron job management endpoints
         .route(
             "/api/cron/jobs",
@@ -607,35 +621,6 @@ pub async fn build_router(
         .route(
             "/api/a2a/tasks/{id}/status",
             axum::routing::get(routes::a2a_external_task_status),
-        )
-        // Integration management endpoints
-        .route(
-            "/api/integrations",
-            axum::routing::get(routes::list_integrations),
-        )
-        .route(
-            "/api/integrations/available",
-            axum::routing::get(routes::list_available_integrations),
-        )
-        .route(
-            "/api/integrations/add",
-            axum::routing::post(routes::add_integration),
-        )
-        .route(
-            "/api/integrations/{id}",
-            axum::routing::delete(routes::remove_integration),
-        )
-        .route(
-            "/api/integrations/{id}/reconnect",
-            axum::routing::post(routes::reconnect_integration),
-        )
-        .route(
-            "/api/integrations/health",
-            axum::routing::get(routes::integrations_health),
-        )
-        .route(
-            "/api/integrations/reload",
-            axum::routing::post(routes::reload_integrations),
         )
         // Device pairing endpoints
         .route(
@@ -787,8 +772,7 @@ pub async fn run_daemon(
     socket.set_nonblocking(true)?;
     socket.bind(&addr.into())?;
     socket.listen(1024)?;
-    let listener =
-        tokio::net::TcpListener::from_std(std::net::TcpListener::from(socket))?;
+    let listener = tokio::net::TcpListener::from_std(std::net::TcpListener::from(socket))?;
 
     // Run server with graceful shutdown.
     // SECURITY: `into_make_service_with_connect_info` injects the peer
@@ -804,11 +788,6 @@ pub async fn run_daemon(
     // Clean up daemon info file
     if let Some(info_path) = daemon_info_path {
         let _ = std::fs::remove_file(info_path);
-    }
-
-    // Stop channel bridges
-    if let Some(ref mut b) = *state.bridge_manager.lock().await {
-        b.stop().await;
     }
 
     // Shutdown kernel
@@ -919,11 +898,8 @@ fn is_daemon_responding(addr: &str) -> bool {
         .or_else(|| addr.strip_prefix("https://"))
         .unwrap_or(addr);
     if let Ok(sock_addr) = addr_only.parse::<std::net::SocketAddr>() {
-        std::net::TcpStream::connect_timeout(
-            &sock_addr,
-            std::time::Duration::from_millis(500),
-        )
-        .is_ok()
+        std::net::TcpStream::connect_timeout(&sock_addr, std::time::Duration::from_millis(500))
+            .is_ok()
     } else {
         // Fallback: try connecting to hostname
         std::net::TcpStream::connect(addr_only)

@@ -1,6 +1,6 @@
 //! Ratatui TUI for OpenFang interactive mode.
 //!
-//! Two-level navigation: Phase::Boot (Welcome/Wizard) → Phase::Main with 16 tabs.
+//! Two-level navigation: Phase::Boot (Welcome/Wizard) → Phase::Main with 13 tabs.
 
 pub mod chat_runner;
 pub mod event;
@@ -12,8 +12,8 @@ use openfang_kernel::OpenFangKernel;
 use openfang_runtime::llm_driver::StreamEvent;
 use openfang_types::agent::AgentId;
 use screens::{
-    agents, audit, channels, chat, comms, dashboard, extensions, hands, logs, memory, peers,
-    security, sessions, settings, skills, templates, triggers, usage, welcome, wizard, workflows,
+    agents, audit, chat, comms, dashboard, logs, memory, peers, security, sessions, settings,
+    skills, templates, triggers, usage, welcome, wizard, workflows,
 };
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -47,10 +47,7 @@ enum Tab {
     Workflows,
     Triggers,
     Memory,
-    Channels,
     Skills,
-    Hands,
-    Extensions,
     Templates,
     Peers,
     Comms,
@@ -69,10 +66,7 @@ const TABS: &[Tab] = &[
     Tab::Workflows,
     Tab::Triggers,
     Tab::Memory,
-    Tab::Channels,
     Tab::Skills,
-    Tab::Hands,
-    Tab::Extensions,
     Tab::Templates,
     Tab::Peers,
     Tab::Comms,
@@ -93,10 +87,7 @@ impl Tab {
             Tab::Workflows => "Workflows",
             Tab::Triggers => "Triggers",
             Tab::Memory => "Memory",
-            Tab::Channels => "Channels",
             Tab::Skills => "Skills",
-            Tab::Hands => "Hands",
-            Tab::Extensions => "Extensions",
             Tab::Templates => "Templates",
             Tab::Peers => "Peers",
             Tab::Comms => "Comms",
@@ -158,14 +149,11 @@ struct App {
     agents: agents::AgentSelectState,
     chat: chat::ChatState,
     dashboard: dashboard::DashboardState,
-    channels: channels::ChannelState,
     workflows: workflows::WorkflowState,
     triggers: triggers::TriggerState,
     sessions: sessions::SessionsState,
     memory: memory::MemoryState,
     skills: skills::SkillsState,
-    hands: hands::HandsState,
-    extensions: extensions::ExtensionsState,
     templates: templates::TemplatesState,
     security: security::SecurityState,
     audit: audit::AuditState,
@@ -197,14 +185,11 @@ impl App {
             agents: agents::AgentSelectState::new(),
             chat: chat::ChatState::new(),
             dashboard: dashboard::DashboardState::new(),
-            channels: channels::ChannelState::new(),
             workflows: workflows::WorkflowState::new(),
             triggers: triggers::TriggerState::new(),
             sessions: sessions::SessionsState::new(),
             memory: memory::MemoryState::new(),
             skills: skills::SkillsState::new(),
-            hands: hands::HandsState::new(),
-            extensions: extensions::ExtensionsState::new(),
             templates: templates::TemplatesState::new(),
             security: security::SecurityState::new(),
             audit: audit::AuditState::new(),
@@ -254,16 +239,6 @@ impl App {
             AppEvent::AuditLoaded(rows) => {
                 self.dashboard.recent_audit = rows;
                 self.dashboard.loading = false;
-            }
-            AppEvent::ChannelListLoaded(list) => {
-                if !list.is_empty() {
-                    self.channels.channels = list;
-                    self.channels.list_state.select(Some(0));
-                }
-                self.channels.loading = false;
-            }
-            AppEvent::ChannelTestResult { success, message } => {
-                self.channels.test_result = Some((success, message));
             }
             AppEvent::WorkflowListLoaded(list) => {
                 self.workflows.workflows = list;
@@ -351,12 +326,9 @@ impl App {
                 match self.active_tab {
                     Tab::Workflows => self.workflows.status_msg = err,
                     Tab::Triggers => self.triggers.status_msg = err,
-                    Tab::Channels => self.channels.status_msg = err,
                     Tab::Sessions => self.sessions.status_msg = err,
                     Tab::Memory => self.memory.status_msg = err,
                     Tab::Skills => self.skills.status_msg = err,
-                    Tab::Hands => self.hands.status_msg = err,
-                    Tab::Extensions => self.extensions.status_msg = err,
                     Tab::Templates => self.templates.status_msg = err,
                     Tab::Settings => self.settings.status_msg = err,
                     _ => {}
@@ -516,8 +488,7 @@ impl App {
             }
             AppEvent::CommsEventsLoaded(events) => {
                 self.comms.events = events;
-                if !self.comms.events.is_empty()
-                    && self.comms.event_list_state.selected().is_none()
+                if !self.comms.events.is_empty() && self.comms.event_list_state.selected().is_none()
                 {
                     self.comms.event_list_state.select(Some(0));
                 }
@@ -533,79 +504,6 @@ impl App {
                 self.logs.entries = entries;
                 self.logs.refilter();
                 self.logs.loading = false;
-            }
-            AppEvent::HandsLoaded(list) => {
-                self.hands.definitions = list;
-                if !self.hands.definitions.is_empty() {
-                    self.hands.marketplace_list.select(Some(0));
-                }
-                self.hands.loading = false;
-            }
-            AppEvent::ActiveHandsLoaded(list) => {
-                self.hands.instances = list;
-                if !self.hands.instances.is_empty() && self.hands.active_list.selected().is_none() {
-                    self.hands.active_list.select(Some(0));
-                }
-                self.hands.loading = false;
-            }
-            AppEvent::HandActivated(name) => {
-                self.hands.status_msg = format!("Activated: {name}");
-                self.refresh_hands();
-            }
-            AppEvent::HandDeactivated(id) => {
-                self.hands.instances.retain(|i| i.instance_id != id);
-                self.hands.status_msg = format!("Deactivated: {id}");
-            }
-            AppEvent::HandPaused(id) => {
-                if let Some(inst) = self
-                    .hands
-                    .instances
-                    .iter_mut()
-                    .find(|i| i.instance_id == id)
-                {
-                    inst.status = "Paused".to_string();
-                }
-                self.hands.status_msg = "Hand paused".to_string();
-            }
-            AppEvent::HandResumed(id) => {
-                if let Some(inst) = self
-                    .hands
-                    .instances
-                    .iter_mut()
-                    .find(|i| i.instance_id == id)
-                {
-                    inst.status = "Active".to_string();
-                }
-                self.hands.status_msg = "Hand resumed".to_string();
-            }
-            AppEvent::ExtensionsLoaded(list) => {
-                self.extensions.all_extensions = list;
-                if !self.extensions.all_extensions.is_empty()
-                    && self.extensions.browse_list.selected().is_none()
-                {
-                    self.extensions.browse_list.select(Some(0));
-                }
-                self.extensions.loading = false;
-            }
-            AppEvent::ExtensionHealthLoaded(entries) => {
-                self.extensions.health_entries = entries;
-                if !self.extensions.health_entries.is_empty()
-                    && self.extensions.health_list.selected().is_none()
-                {
-                    self.extensions.health_list.select(Some(0));
-                }
-            }
-            AppEvent::ExtensionInstalled(id) => {
-                self.extensions.status_msg = format!("Installed: {id}");
-                self.refresh_extensions();
-            }
-            AppEvent::ExtensionRemoved(id) => {
-                self.extensions.status_msg = format!("Removed: {id}");
-                self.refresh_extensions();
-            }
-            AppEvent::ExtensionReconnected(id, tools) => {
-                self.extensions.status_msg = format!("Reconnected {id}: {tools} tools");
-                self.refresh_extension_health();
             }
         }
     }
@@ -672,22 +570,18 @@ impl App {
                     return;
                 }
                 KeyCode::F(8) => {
-                    self.switch_tab(Tab::Channels);
-                    return;
-                }
-                KeyCode::F(9) => {
                     self.switch_tab(Tab::Skills);
                     return;
                 }
-                KeyCode::F(10) => {
+                KeyCode::F(9) => {
                     self.switch_tab(Tab::Templates);
                     return;
                 }
-                KeyCode::F(11) => {
+                KeyCode::F(10) => {
                     self.switch_tab(Tab::Peers);
                     return;
                 }
-                KeyCode::F(12) => {
+                KeyCode::F(11) => {
                     self.switch_tab(Tab::Security);
                     return;
                 }
@@ -762,15 +656,15 @@ impl App {
                         return;
                     }
                     KeyCode::Char('8') => {
-                        self.switch_tab(Tab::Channels);
-                        return;
-                    }
-                    KeyCode::Char('9') => {
                         self.switch_tab(Tab::Skills);
                         return;
                     }
-                    KeyCode::Char('0') => {
+                    KeyCode::Char('9') => {
                         self.switch_tab(Tab::Templates);
+                        return;
+                    }
+                    KeyCode::Char('0') => {
+                        self.switch_tab(Tab::Peers);
                         return;
                     }
                     _ => {}
@@ -814,10 +708,6 @@ impl App {
                     let action = self.chat.handle_key(key);
                     self.handle_chat_action(action);
                 }
-                Tab::Channels => {
-                    let action = self.channels.handle_key(key);
-                    self.handle_channel_action(action);
-                }
                 Tab::Workflows => {
                     let action = self.workflows.handle_key(key);
                     self.handle_workflow_action(action);
@@ -837,14 +727,6 @@ impl App {
                 Tab::Skills => {
                     let action = self.skills.handle_key(key);
                     self.handle_skills_action(action);
-                }
-                Tab::Extensions => {
-                    let action = self.extensions.handle_key(key);
-                    self.handle_extensions_action(action);
-                }
-                Tab::Hands => {
-                    let action = self.hands.handle_key(key);
-                    self.handle_hands_action(action);
                 }
                 Tab::Templates => {
                     let action = self.templates.handle_key(key);
@@ -891,14 +773,11 @@ impl App {
         self.welcome.tick();
         self.chat.tick();
         self.dashboard.tick();
-        self.channels.tick();
         self.workflows.tick();
         self.triggers.tick();
         self.sessions.tick();
         self.memory.tick();
         self.skills.tick();
-        self.hands.tick();
-        self.extensions.tick();
         self.templates.tick();
         self.security.tick();
         self.audit.tick();
@@ -949,14 +828,11 @@ impl App {
         match tab {
             Tab::Dashboard => self.refresh_dashboard(),
             Tab::Agents => self.refresh_agents(),
-            Tab::Channels => self.refresh_channels(),
             Tab::Workflows => self.refresh_workflows(),
             Tab::Triggers => self.refresh_triggers(),
             Tab::Sessions => self.refresh_sessions(),
             Tab::Memory => self.refresh_memory(),
             Tab::Skills => self.refresh_skills(),
-            Tab::Hands => self.refresh_hands(),
-            Tab::Extensions => self.refresh_extensions(),
             Tab::Templates => self.refresh_templates(),
             Tab::Security => self.refresh_security(),
             Tab::Audit => self.refresh_audit(),
@@ -976,7 +852,6 @@ impl App {
         // Load initial data for visible tabs
         self.refresh_agents();
         self.refresh_dashboard();
-        self.refresh_channels();
     }
 
     // ─── Data refresh helpers ────────────────────────────────────────────────
@@ -997,17 +872,6 @@ impl App {
                 self.agents.load_inprocess_agents(kernel);
             }
             Backend::None => {}
-        }
-    }
-
-    fn refresh_channels(&mut self) {
-        if let Some(backend) = self.backend.to_ref() {
-            self.channels.loading = true;
-            event::spawn_fetch_channels(backend, self.event_tx.clone());
-        }
-        // Also build defaults from env detection
-        if self.channels.channels.is_empty() {
-            self.channels.build_default_channels();
         }
     }
 
@@ -1043,27 +907,6 @@ impl App {
         if let Some(backend) = self.backend.to_ref() {
             self.skills.loading = true;
             event::spawn_fetch_skills(backend, self.event_tx.clone());
-        }
-    }
-
-    fn refresh_hands(&mut self) {
-        if let Some(backend) = self.backend.to_ref() {
-            self.hands.loading = true;
-            event::spawn_fetch_hands(backend.clone(), self.event_tx.clone());
-            event::spawn_fetch_active_hands(backend, self.event_tx.clone());
-        }
-    }
-
-    fn refresh_extensions(&mut self) {
-        if let Some(backend) = self.backend.to_ref() {
-            self.extensions.loading = true;
-            event::spawn_fetch_extensions(backend, self.event_tx.clone());
-        }
-    }
-
-    fn refresh_extension_health(&mut self) {
-        if let Some(backend) = self.backend.to_ref() {
-            event::spawn_fetch_extension_health(backend, self.event_tx.clone());
         }
     }
 
@@ -1369,51 +1212,6 @@ impl App {
         }
     }
 
-    fn handle_channel_action(&mut self, action: channels::ChannelAction) {
-        match action {
-            channels::ChannelAction::Continue => {}
-            channels::ChannelAction::Refresh => self.refresh_channels(),
-            channels::ChannelAction::TestChannel(name) => {
-                if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_test_channel(backend, name, self.event_tx.clone());
-                }
-            }
-            channels::ChannelAction::ToggleChannel(_name, _enabled) => {
-                // Toggle is handled locally in the state; daemon toggle
-                // could be spawned here if the API supports it.
-            }
-            channels::ChannelAction::SaveChannel(name, values) => {
-                // Save channel credentials via daemon API
-                if let Some(backend) = self.backend.to_ref() {
-                    let tx = self.event_tx.clone();
-                    std::thread::spawn(move || {
-                        if let event::BackendRef::Daemon(base_url) = backend {
-                            let client = reqwest::blocking::Client::builder()
-                                .timeout(std::time::Duration::from_secs(10))
-                                .build()
-                                .ok();
-                            if let Some(client) = client {
-                                let mut fields = serde_json::Map::new();
-                                for (k, v) in &values {
-                                    fields.insert(k.clone(), serde_json::Value::String(v.clone()));
-                                }
-                                let body = serde_json::json!({ "fields": fields });
-                                let _ = client
-                                    .post(format!("{base_url}/api/channels/{name}/configure"))
-                                    .json(&body)
-                                    .send();
-                            }
-                        }
-                        // Signal tick so the UI refreshes next cycle
-                        let _ = tx.send(event::AppEvent::Tick);
-                    });
-                }
-                // Immediately trigger a refresh of the channel list
-                self.refresh_channels();
-            }
-        }
-    }
-
     fn handle_workflow_action(&mut self, action: workflows::WorkflowAction) {
         match action {
             workflows::WorkflowAction::Continue => {}
@@ -1560,62 +1358,6 @@ impl App {
                 if let Some(backend) = self.backend.to_ref() {
                     self.skills.loading = true;
                     event::spawn_fetch_mcp_servers(backend, self.event_tx.clone());
-                }
-            }
-        }
-    }
-
-    fn handle_extensions_action(&mut self, action: extensions::ExtensionsAction) {
-        match action {
-            extensions::ExtensionsAction::Continue => {}
-            extensions::ExtensionsAction::RefreshAll => self.refresh_extensions(),
-            extensions::ExtensionsAction::RefreshHealth => self.refresh_extension_health(),
-            extensions::ExtensionsAction::Install(id) => {
-                if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_install_extension(backend, id, self.event_tx.clone());
-                }
-            }
-            extensions::ExtensionsAction::Remove(id) => {
-                if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_remove_extension(backend, id, self.event_tx.clone());
-                }
-            }
-            extensions::ExtensionsAction::Reconnect(id) => {
-                if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_reconnect_extension(backend, id, self.event_tx.clone());
-                }
-            }
-        }
-    }
-
-    fn handle_hands_action(&mut self, action: hands::HandsAction) {
-        match action {
-            hands::HandsAction::Continue => {}
-            hands::HandsAction::RefreshDefinitions => self.refresh_hands(),
-            hands::HandsAction::RefreshActive => {
-                if let Some(backend) = self.backend.to_ref() {
-                    self.hands.loading = true;
-                    event::spawn_fetch_active_hands(backend, self.event_tx.clone());
-                }
-            }
-            hands::HandsAction::ActivateHand(hand_id) => {
-                if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_activate_hand(backend, hand_id, self.event_tx.clone());
-                }
-            }
-            hands::HandsAction::DeactivateHand(instance_id) => {
-                if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_deactivate_hand(backend, instance_id, self.event_tx.clone());
-                }
-            }
-            hands::HandsAction::PauseHand(instance_id) => {
-                if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_pause_hand(backend, instance_id, self.event_tx.clone());
-                }
-            }
-            hands::HandsAction::ResumeHand(instance_id) => {
-                if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_resume_hand(backend, instance_id, self.event_tx.clone());
                 }
             }
         }
@@ -1869,14 +1611,8 @@ impl App {
                                             .as_str()
                                             .unwrap_or("")
                                             .to_string(),
-                                        provider: m["provider"]
-                                            .as_str()
-                                            .unwrap_or("")
-                                            .to_string(),
-                                        tier: m["tier"]
-                                            .as_str()
-                                            .unwrap_or("Balanced")
-                                            .to_string(),
+                                        provider: m["provider"].as_str().unwrap_or("").to_string(),
+                                        tier: m["tier"].as_str().unwrap_or("Balanced").to_string(),
                                     })
                                     .collect()
                             })
@@ -1935,8 +1671,7 @@ impl App {
                                 .send()
                             {
                                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                                    let provider =
-                                        body["model_provider"].as_str().unwrap_or("?");
+                                    let provider = body["model_provider"].as_str().unwrap_or("?");
                                     let model = body["model_name"].as_str().unwrap_or("?");
                                     self.chat.model_label = format!("{provider}/{model}");
                                 }
@@ -1988,10 +1723,8 @@ impl App {
                             );
                         }
                         Err(e) => {
-                            self.chat.push_message(
-                                chat::Role::System,
-                                format!("Switch failed: {e}"),
-                            );
+                            self.chat
+                                .push_message(chat::Role::System, format!("Switch failed: {e}"));
                         }
                     }
                 }
@@ -2152,42 +1885,6 @@ impl App {
                     self.switch_model(args);
                 }
             }
-            "/hands" => match &self.backend {
-                Backend::InProcess { kernel } => {
-                    let defs = kernel.hand_registry.list_definitions();
-                    let instances = kernel.hand_registry.list_instances();
-                    let mut msg = format!("Available hands ({}):\n", defs.len());
-                    for d in &defs {
-                        let reqs_met = kernel
-                            .hand_registry
-                            .check_requirements(&d.id)
-                            .map(|r| r.iter().all(|(_, ok)| *ok))
-                            .unwrap_or(false);
-                        let badge = if reqs_met { "Ready" } else { "Setup" };
-                        msg.push_str(&format!(
-                            "  {} {} — {} [{}]\n",
-                            d.icon, d.name, d.description, badge
-                        ));
-                    }
-                    if !instances.is_empty() {
-                        msg.push_str(&format!("\nActive hands ({}):\n", instances.len()));
-                        for i in &instances {
-                            msg.push_str(&format!(
-                                "  {} — {} ({})\n",
-                                i.agent_name, i.hand_id, i.status
-                            ));
-                        }
-                    }
-                    self.chat.push_message(chat::Role::System, msg);
-                }
-                _ => {
-                    self.chat.push_message(
-                        chat::Role::System,
-                        "Hands info requires in-process mode. Use the Hands tab instead."
-                            .to_string(),
-                    );
-                }
-            },
             _ => {
                 self.chat.push_message(
                     chat::Role::System,
@@ -2233,14 +1930,11 @@ impl App {
                     Tab::Dashboard => dashboard::draw(frame, chunks[1], &mut self.dashboard),
                     Tab::Agents => agents::draw(frame, chunks[1], &mut self.agents),
                     Tab::Chat => chat::draw(frame, chunks[1], &mut self.chat),
-                    Tab::Channels => channels::draw(frame, chunks[1], &mut self.channels),
                     Tab::Workflows => workflows::draw(frame, chunks[1], &mut self.workflows),
                     Tab::Triggers => triggers::draw(frame, chunks[1], &mut self.triggers),
                     Tab::Sessions => sessions::draw(frame, chunks[1], &mut self.sessions),
                     Tab::Memory => memory::draw(frame, chunks[1], &mut self.memory),
                     Tab::Skills => skills::draw(frame, chunks[1], &mut self.skills),
-                    Tab::Hands => hands::draw(frame, chunks[1], &mut self.hands),
-                    Tab::Extensions => extensions::draw(frame, chunks[1], &mut self.extensions),
                     Tab::Templates => templates::draw(frame, chunks[1], &mut self.templates),
                     Tab::Security => security::draw(frame, chunks[1], &mut self.security),
                     Tab::Audit => audit::draw(frame, chunks[1], &mut self.audit),

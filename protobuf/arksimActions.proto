@@ -1,0 +1,192 @@
+syntax = "proto3";
+
+package ArkSimActionProto;
+
+//import "afsimproto.proto";
+
+//枚举类型，用于判断是那个外部指令
+enum E_Actions
+{
+	E_SetAgentOutsideControl = 0;	 //设置可控制实体
+	E_ReleaseOutsideControl = 1;	 //取消可控制实体
+	E_SetDesiredVelocity = 2;		 //设置期望速度
+	E_SetDesiredAltitude = 3;		 //设置期望高度
+	E_SetDesiredHeading = 4;		 //设置期望朝向
+	E_GoToLocation = 5;				 //改变位置
+	E_FollowRoute = 6;				 //设置跟随路线
+	E_AuxActions = 7;				 //aux指令目前统一处理透传，在脚本中处理
+	E_TurnOnSensor = 8;				 //打开传感器
+	E_TurnOffSensor = 9;			 //关闭传感器
+	E_ChangeSensorMode = 10;		 //改变工作模式
+	E_GetSensorCurrentMode = 11;	 //获取传感器工作模式
+	E_FireAtTarget = 12;			 //开火
+	E_FireSlavoAtTarget = 13;		 //用特定武器向目标齐射
+	E_UpdateTarget = 14;			 //更新当前目标
+	E_StartJamming = 15;			 //开干扰
+	E_StopJamming = 16;				 //关干扰
+	E_ChangeJammingMode = 17;		 //改变工作模式
+	E_TurnOnComm = 18;				 //通信开机
+	E_TurnOffComm = 19;				 //通信关机
+	E_SendMsgToPlatform = 20;	     //向特定平台发送消息
+	E_SendMsgToCommandChain = 21;	 //向特定指挥链发送消息	
+	E_ChangePlatformNumber = 22;	 //修改仿真实体数量（增加实体和删除实体）
+	E_ChangeCommander = 23;			 //更换实体的指挥链上级
+}
+message AgentName
+{
+	string		agent_id = 1;//目标实体的名字
+	string		Component_id = 2;//目标携带传感器、通信组件、武器的名字/当指令只控制实体时，此字段为空
+}
+
+message AgentContrl//指令 0,1用此指令
+{
+	E_Actions  action = 1;		//指令类型
+	string		agent_id = 2;//目标实体的名字
+}
+message DesiredHeading
+{
+	string			agent_id = 1;//需要执行该action的名字.
+	double			desired_heading = 2;//要求platform转向的heading（radians），顺时钟为正方向，北为0 radians。
+	bool			has_desired_velocity = 3;//转弯时使用的速度（可选）（m/s）
+	double			desired_velocity = 4;//期望的速度
+	bool			has_desired_turn_direction = 5;//platform转向的方向（可选），如果不指定，仿真时采用最短路径
+	uint32				desired_turn_direction = 6;//期望的turn方向0-左，1-右
+}
+message DesiredAltitude 
+{	
+	string		agent_id = 1;//需要执行该action的名字.
+	double			desired_altitude = 2;//期望的高度（m）
+	bool			has_desired_altitude_rate = 3;//上升/下降的速率（可选）（m/s），如果指定，总是正值
+	double			desired_altitude_rate = 4;//期望的高度速率
+}
+message DesiredVelocity
+{
+	string		agent_id = 1;//需要执行该action的名字.
+	double 			desired_velocity = 2;//期望速度
+	double			linearAccel = 3;//线性加速度
+}
+message GoToLocation
+{
+	string		agent_id = 1;//需要执行该action的名字.
+	uint32 			priority = 2;
+    repeated double reportedLocationLLA = 3;
+}
+message Waypoint
+{
+	string		WaypointID = 1;
+	double			speed = 2;
+	repeated double	reportedLocationLLA = 3;
+}
+message FollowRoute
+{
+	string		agent_id = 1;//需要执行该action的名字.
+	string      aRouteName = 2;
+	repeated Waypoint repeatedpoint = 3;//路径点集合
+}
+message SensorAction//指令类型为8-9-11-14-16-18-19
+{
+	E_Actions  action = 1;		//指令类型
+	AgentName  agent = 2;
+}
+message ChangeSensorMode
+{
+	AgentName  agent = 1;
+	string		mode = 2;//
+}
+message FireAtTarget//12-15
+{
+	E_Actions  action = 1;		//指令类型
+	AgentName  agent = 2;
+	string		trck_id = 3;//
+}
+message FireSlavoAtTarget
+{
+	AgentName  		agent = 1;
+	string		trck_id = 2;//
+	uint32   			slavo_size = 3;
+}
+message JammingModeStruct
+{
+	double			aFrequency = 1;
+	double			aBandwidth = 2;
+	uint32				aBeamNumber = 3;
+}
+message ChangeJammingMode
+{
+	AgentName  			agent = 1;
+	JammingModeStruct 	mode = 2;
+}
+message SendMsgToPlatform
+{
+	AgentName  			agent = 1;
+	string			target_id = 2;//
+	string			message = 3;//
+}
+message SendMsgToCommandChain
+{
+	AgentName  			agent = 1;
+	string			target_id = 2;//
+	uint32                 mode = 3;
+	string			message = 4;
+}
+//auxdata
+message AfsimAuxCommand
+{
+    repeated PlatformAuxData platformAux=1;
+    //bool killCommand=2;
+}
+message PlatformAuxData
+{
+    string name=2; //name of platform to set aux data on
+    uint32 index=3;
+
+    repeated AuxData auxdata=1; //aux data to set
+}
+message AuxData
+{
+    string key=1;
+    uint32 type=3; //0=STRING,1=DOUBLE,2=BOOL,3=DICT
+
+    // only one of these should be set
+    string stringValue=2;
+    double doubleValue=4;
+    bool boolValue=5;
+    repeated AuxData dictValue=6;
+}
+//
+message ChangeCommander
+{
+	string name=1; //name of platform
+	string commander=2; //name of commander
+}
+message ChangePlatformNumber
+{
+	string name=1; //name of platform
+	bool   ordertype=2;//true代表增加，反之代表删除
+	string     type=3;
+	string     side=4;
+	double     lon=5;//经度
+	double     lat=6;
+	double     alt=7;
+	double     direction=8;
+	double     speed=9;
+}
+message ActionsFromOutside//指令数据包集合
+{
+	repeated AgentContrl            a_agentcontrl = 1;
+	repeated DesiredHeading         a_desiredheading = 2;
+	repeated DesiredAltitude        a_desiredaltitude = 3;
+	repeated DesiredVelocity        a_desiredvelocity = 4;
+	repeated GoToLocation           a_gotolocation = 5;
+	repeated FollowRoute            a_followroute = 6;
+	repeated SensorAction           a_sensoraction = 7;
+	repeated ChangeSensorMode       a_changesensormode = 8;
+	repeated FireAtTarget           a_fireattarget = 9;
+	repeated FireSlavoAtTarget      a_fireslavoattarget = 10;
+	repeated ChangeJammingMode      a_changejammingmode = 11;
+	repeated SendMsgToPlatform      a_sendmsgtoplatform = 12;
+	repeated SendMsgToCommandChain  a_sendmsgtocommandchain = 13;
+	repeated AfsimAuxCommand        a_afsimauxcommand = 14;
+	repeated ChangeCommander  		a_ChangeCommander = 15;
+	repeated ChangePlatformNumber   a_ChangePlatformNumber = 16;
+}

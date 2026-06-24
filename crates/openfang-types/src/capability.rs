@@ -69,6 +69,18 @@ pub enum Capability {
     EconEarn,
     /// Can transfer funds to agents matching the pattern.
     EconTransfer(String),
+
+    // -- Weapon Control (tactical) --
+    /// Arm weapon systems on a platform.
+    WeaponArm(String),
+    /// Launch/fire a weapon at a target.
+    WeaponLaunch(String),
+    /// Abort an in-flight weapon launch.
+    WeaponAbort(String),
+    /// Control payload systems (sensors, jammers, comms).
+    PayloadControl(String),
+    /// Initiate self-destruct sequence (requires multi-party HMAC).
+    SelfDestruct,
 }
 
 /// Result of a capability check.
@@ -117,7 +129,7 @@ pub fn capability_matches(granted: &Capability, required: &Capability) -> bool {
             glob_matches(pattern, host)
         }
         (Capability::ToolInvoke(granted_id), Capability::ToolInvoke(required_id)) => {
-            granted_id == required_id || granted_id == "*"
+            glob_matches(granted_id, required_id)
         }
         (Capability::LlmQuery(pattern), Capability::LlmQuery(model)) => {
             glob_matches(pattern, model)
@@ -142,12 +154,25 @@ pub fn capability_matches(granted: &Capability, required: &Capability) -> bool {
         (Capability::EconTransfer(pattern), Capability::EconTransfer(target)) => {
             glob_matches(pattern, target)
         }
+        (Capability::WeaponArm(pattern), Capability::WeaponArm(target)) => {
+            glob_matches(pattern, target)
+        }
+        (Capability::WeaponLaunch(pattern), Capability::WeaponLaunch(target)) => {
+            glob_matches(pattern, target)
+        }
+        (Capability::WeaponAbort(pattern), Capability::WeaponAbort(target)) => {
+            glob_matches(pattern, target)
+        }
+        (Capability::PayloadControl(pattern), Capability::PayloadControl(target)) => {
+            glob_matches(pattern, target)
+        }
 
         // Simple boolean capabilities
         (Capability::AgentSpawn, Capability::AgentSpawn) => true,
         (Capability::OfpDiscover, Capability::OfpDiscover) => true,
         (Capability::OfpAdvertise, Capability::OfpAdvertise) => true,
         (Capability::EconEarn, Capability::EconEarn) => true,
+        (Capability::SelfDestruct, Capability::SelfDestruct) => true,
 
         // Numeric capabilities
         (Capability::NetListen(granted_port), Capability::NetListen(required_port)) => {
@@ -248,6 +273,22 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_invoke_supports_glob_patterns() {
+        assert!(capability_matches(
+            &Capability::ToolInvoke("platform_sensor_*".to_string()),
+            &Capability::ToolInvoke("platform_sensor_on".to_string()),
+        ));
+        assert!(capability_matches(
+            &Capability::ToolInvoke("platform_fire_*".to_string()),
+            &Capability::ToolInvoke("platform_fire_at_target".to_string()),
+        ));
+        assert!(!capability_matches(
+            &Capability::ToolInvoke("platform_sensor_*".to_string()),
+            &Capability::ToolInvoke("platform_set_heading".to_string()),
+        ));
+    }
+
+    #[test]
     fn test_different_variants_dont_match() {
         assert!(!capability_matches(
             &Capability::FileRead("*".to_string()),
@@ -302,6 +343,46 @@ mod tests {
             Capability::NetConnect("api.example.com:443".to_string()),
         ];
         assert!(validate_capability_inheritance(&parent, &child).is_ok());
+    }
+
+    #[test]
+    fn test_weapon_capability_matches() {
+        assert!(capability_matches(
+            &Capability::WeaponArm("*".to_string()),
+            &Capability::WeaponArm("torpedo-01".to_string()),
+        ));
+        assert!(!capability_matches(
+            &Capability::WeaponArm("cannon".to_string()),
+            &Capability::WeaponArm("torpedo".to_string()),
+        ));
+    }
+
+    #[test]
+    fn test_self_destruct_boolean() {
+        assert!(capability_matches(
+            &Capability::SelfDestruct,
+            &Capability::SelfDestruct
+        ));
+    }
+
+    #[test]
+    fn test_weapon_capability_inheritance() {
+        let parent = vec![
+            Capability::WeaponArm("*".to_string()),
+            Capability::WeaponLaunch("*".to_string()),
+            Capability::SelfDestruct,
+        ];
+        let child = vec![
+            Capability::WeaponArm("torpedo".to_string()),
+            Capability::WeaponLaunch("torpedo".to_string()),
+            Capability::SelfDestruct,
+        ];
+        assert!(validate_capability_inheritance(&parent, &child).is_ok());
+
+        // Child trying to get SelfDestruct that parent doesn't have
+        let bad_parent = vec![Capability::WeaponArm("*".to_string())];
+        let bad_child = vec![Capability::SelfDestruct];
+        assert!(validate_capability_inheritance(&bad_parent, &bad_child).is_err());
     }
 
     #[test]

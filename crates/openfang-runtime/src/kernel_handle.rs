@@ -209,6 +209,27 @@ pub trait KernelHandle: Send + Sync {
         Err("Channel media send not available".to_string())
     }
 
+    /// Dispatch a `platform_*` tool call through the kernel's platform control
+    /// layer. The kernel maps the tool + JSON args to a gated `CandidateIntent`
+    /// (or services a query tool against platform state) and returns a
+    /// human-readable result. Default: platform control unavailable.
+    ///
+    /// `caller_agent_id`, when set, is the persona-side identity used by the
+    /// tactical policy layer to enforce per-agent
+    /// [`TacticalAgentPolicy`](openfang_types::tactical::TacticalAgentPolicy)
+    /// limits (command-class allowlist, autonomy-mode allowlist, advisory-only
+    /// mode, mandatory human approval). It is also threaded into the
+    /// resulting [`IntentSource::Llm { agent_id }`] for audit provenance.
+    async fn dispatch_platform_command(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        caller_agent_id: Option<&str>,
+    ) -> Result<String, String> {
+        let _ = (tool_name, args, caller_agent_id);
+        Err("platform control not available in this build".to_string())
+    }
+
     /// Spawn an agent with capability inheritance enforcement.
     /// `parent_caps` are the parent's granted capabilities. The kernel MUST verify
     /// that every capability in the child manifest is covered by `parent_caps`.
